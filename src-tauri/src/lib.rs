@@ -24,17 +24,19 @@ pub fn run() {
         .setup(|app| {
             // Initialize state. The secret store uses the OS keyring
             // in production; tests swap in `InMemoryStore` via a
-            // different `run()` entry point. We Arc it so the HCI
-            // server can share the same instance the Tauri IPC commands
-            // see.
-            let state = Arc::new(commands::AppState::new(Arc::new(secrets::KeyringStore::new())));
-            app.manage(state.clone());
+            // different `run()` entry point. Tauri commands take
+            // `State<'_, AppState>` directly, so we manage the bare
+            // type; HCI gets a clone to share the same instance.
+            // `AppState: Clone` so this is safe.
+            let state = commands::AppState::new(Arc::new(secrets::KeyringStore::new()));
+            let state_for_hci = state.clone();
+            app.manage(state);
 
             // HCI: start the control-interface server in a background
             // task. Disabled by default in release, on by default in
             // dev. No-ops if `HARNESS_CONTROL=0` is set.
             tauri::async_runtime::spawn(async move {
-                match hci::integration::start(state).await {
+                match hci::integration::start(Arc::new(state_for_hci)).await {
                     Ok(Some(_server)) => {
                         // Kept alive for the life of the app. The Drop
                         // handler deletes the conn-info file on shutdown.

@@ -12,8 +12,9 @@ use crate::secrets::SecretStore;
 
 // ============================= App State =============================
 
+#[derive(Clone)]
 pub struct AppState {
-    pub agents: Mutex<HashMap<String, Agent>>,
+    pub agents: Arc<Mutex<HashMap<String, Agent>>>,
     /// OS keyring-backed secret store. `Arc` so the LLM client can
     /// hold a reference after the IPC closure returns.
     pub secrets: Arc<dyn SecretStore>,
@@ -30,18 +31,18 @@ pub struct AppState {
     pub pending_approvals: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// Active session file watcher. None until the frontend calls
     /// `watch_session` after opening a project.
-    pub session_watcher: Mutex<Option<crate::session_watcher::SessionWatcher>>,
+    pub session_watcher: Arc<Mutex<Option<crate::session_watcher::SessionWatcher>>>,
 }
 
 impl AppState {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
         Self {
-            agents: Mutex::new(HashMap::new()),
+            agents: Arc::new(Mutex::new(HashMap::new())),
             secrets,
             in_flight: Arc::new(dashmap::DashMap::new()),
             agent_in_flight: Arc::new(dashmap::DashMap::new()),
             pending_approvals: Arc::new(dashmap::DashMap::new()),
-            session_watcher: Mutex::new(None),
+            session_watcher: Arc::new(Mutex::new(None)),
         }
     }
 }

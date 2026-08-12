@@ -1,31 +1,14 @@
-feat(hci): post-auth frame loop + session file watcher
+fix(state): make AppState Clone so HCI can share the managed instance
 
-Makes the HCI server actually usable:
+The previous attempt wrapped AppState in Arc before app.manage(),
+which broke the State<'_, AppState> extractor used by every Tauri
+command (error: "state not managed for field state on command
+list_saved_models").
 
-- server.rs: after auth, the per-connection task enters a
-  newline-delimited JSON-RPC frame loop and dispatches each frame
-  through the shared router. Closes the WP3 "router hook" that
-  was a stub.
-- server.rs: HciServer now holds an Arc<Router> + RpcContext.
-  Tests updated to pass them in.
-- integration.rs: HCI startup constructs the router and
-  RpcContext, threads the live Tauri AppState in so handlers
-  can see agents, sessions, and the in-flight map.
-- auth.rs: new_with_random() constructor for the integration path
-  (the integration owns the boot token, not the server).
-- session_watcher.rs (new): notify-based file watcher on
-  <workspace>/.harness/sessions/. Emits session-file-changed
-  Tauri event on Create/Modify(Data) of a .json file.
-- commands.rs: watch_session Tauri command starts/replaces the
-  watcher for a workspace. AppState now owns the active watcher
-  in a Mutex<Option<...>>.
-- ipc.ts: watchSession wrapper.
-- session-manager.ts: calls ipc.watchSession after loadProject
-  AND listens for session-file-changed to re-read the active
-  session from disk into the in-memory store.
+Fix: derive Clone on AppState and wrap the inner Mutex fields in
+Arc so the struct itself can be cloned. setup() calls .clone() and
+passes the original to app.manage() and the clone to HCI. Both
+references share the same underlying mutex/dashmap data because the
+fields are Arc-wrapped.
 
-This is the live-reload fix for the chat-mode "response only
-shows after app restart" bug. The chat streaming path in Rust
-never persisted messages to disk; the frontend's
-flushPendingSave wrote them, but the in-memory store had no
-signal to re-fetch. The file watcher closes that loop.
+No more ptr::read, no UB, no missing-state errors.
