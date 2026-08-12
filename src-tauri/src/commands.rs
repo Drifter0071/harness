@@ -28,6 +28,9 @@ pub struct AppState {
     /// running turn — tools execute sequentially). `respond_approval` resolves
     /// them.
     pub pending_approvals: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Active session file watcher. None until the frontend calls
+    /// `watch_session` after opening a project.
+    pub session_watcher: Mutex<Option<crate::session_watcher::SessionWatcher>>,
 }
 
 impl AppState {
@@ -38,6 +41,7 @@ impl AppState {
             in_flight: Arc::new(dashmap::DashMap::new()),
             agent_in_flight: Arc::new(dashmap::DashMap::new()),
             pending_approvals: Arc::new(dashmap::DashMap::new()),
+            session_watcher: Mutex::new(None),
         }
     }
 }
@@ -578,6 +582,28 @@ pub async fn chat_complete(
     tauri::async_runtime::spawn(async move {
         let _ = llm_client::run_chat(request, secrets, in_flight, app).await;
     });
+    Ok(())
+}
+
+/// Start (or replace) the session file watcher for `workspace_path`.
+/// Called by the frontend right after loading a project. Emits
+/// `session-file-changed` whenever a session JSON file under
+/// `<workspace>/.harness/sessions/` is written.
+#[tauri::command]
+pub async fn watch_session(
+    workspace_path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use std::path::PathBuf;
+    let mut guard = state.session_watcher.lock().await;
+    // Drop the old watcher (releasing the OS handle) before starting
+    // a new one — only one watch per process.
+    *guard = None;
+    let path = PathBuf::from(&workspace_path);
+    let watcher = crate::session_watcher::SessionWatcher::start(app, path)
+        .map_err(|e| format!("watcher: {e}"))?;
+    *guard = Some(watcher);
     Ok(())
 }
 

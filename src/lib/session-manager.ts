@@ -13,6 +13,7 @@
 import { useEffect } from "react";
 import { useStore } from "./store";
 import { ipc, agentEvents } from "./ipc";
+import { listen } from "@tauri-apps/api/event";
 import type {
   ActionMode,
   AgentSnapshot,
@@ -205,6 +206,16 @@ async function loadProject(path: string): Promise<void> {
     showToast(`Failed to load project: ${err}`);
     useStore.setState({ workspaceStatus: "ready" });
   }
+
+  // Start the Rust-side session file watcher so the UI re-reads
+  // session JSON from disk when it changes. Without this, the chat
+  // path's flushPendingSave writes go to disk but the in-memory
+  // store never sees them.
+  try {
+    await ipc.watchSession(path);
+  } catch {
+    // Best-effort. The watcher is a debugging aid; not fatal.
+  }
 }
 
 // ── Agent turn entry points (used by the composer) ──
@@ -311,6 +322,33 @@ function useAgentEvents(): void {
       return p;
     };
     const unsubs: Promise<() => void>[] = [];
+
+    // Live reload: when the Rust-side session file watcher sees a
+    // write to `<workspace>/.harness/sessions/<id>.json`, re-read
+    // the active session from disk and apply it. This is what makes
+    // the chat path's `flushPendingSave` visible in the UI without
+    // an app restart.
+    unsubs.push(
+      reg(
+        listen<{ path: string }>("session-file-changed", async () => {
+          const st = useStore.getState();
+          if (!st.workspacePath || !st.activeSessionId) return;
+          // Skip if a streaming turn is in flight — the in-memory
+          // store is ahead of disk and re-reading would clobber it.
+          if (st.streamingRequestId || st.agentRequestId) return;
+          try {
+            const session = await ipc.loadSession(
+              st.workspacePath,
+              st.activeSessionId,
+            );
+            if (session) applySession(session, st.workspacePath);
+          } catch {
+            // Best-effort.
+          }
+        })
+      )
+    );
+
 
     unsubs.push(
       reg(

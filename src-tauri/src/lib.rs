@@ -8,6 +8,7 @@ mod llm_client;
 mod models;
 mod secrets;
 mod session;
+mod session_watcher;
 mod tools;
 mod web_search;
 
@@ -23,21 +24,17 @@ pub fn run() {
         .setup(|app| {
             // Initialize state. The secret store uses the OS keyring
             // in production; tests swap in `InMemoryStore` via a
-            // different `run()` entry point.
-            let state = commands::AppState::new(Arc::new(secrets::KeyringStore::new()));
-            app.manage(state);
+            // different `run()` entry point. We Arc it so the HCI
+            // server can share the same instance the Tauri IPC commands
+            // see.
+            let state = Arc::new(commands::AppState::new(Arc::new(secrets::KeyringStore::new())));
+            app.manage(state.clone());
 
             // HCI: start the control-interface server in a background
             // task. Disabled by default in release, on by default in
             // dev. No-ops if `HARNESS_CONTROL=0` is set.
-            //
-            // We don't need a clone of state here; HCI only reads the
-            // env-var flags and binds a TCP listener. The handlers
-            // themselves take `RpcContext.app` injected per-request
-            // from a future follow-up that pulls the managed state
-            // out of the Tauri runtime.
             tauri::async_runtime::spawn(async move {
-                match hci::integration::start().await {
+                match hci::integration::start(state).await {
                     Ok(Some(_server)) => {
                         // Kept alive for the life of the app. The Drop
                         // handler deletes the conn-info file on shutdown.
@@ -83,6 +80,8 @@ pub fn run() {
             // Chat streaming (Phase 2.0 spec)
             commands::chat_complete,
             commands::cancel_chat,
+            // Session file watcher (live reload from disk)
+            commands::watch_session,
             // Sessions + recents + project opening (Phase 1.5 spec)
             commands::pick_project_folder,
             commands::list_sessions,

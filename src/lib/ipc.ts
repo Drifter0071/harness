@@ -400,6 +400,8 @@ export const ipc = {
     invoke<Session | null>("load_session", { projectPath, sessionId }),
   saveSession: (projectPath: string, session: Session) =>
     invoke<Session>("save_session", { projectPath, session }),
+  watchSession: (workspacePath: string) =>
+    invoke<void>("watch_session", { workspacePath }),
   renameSession: (projectPath: string, sessionId: string, title: string) =>
     invoke<SessionSummary>("rename_session", { projectPath, sessionId, title }),
   deleteSession: (projectPath: string, sessionId: string) =>

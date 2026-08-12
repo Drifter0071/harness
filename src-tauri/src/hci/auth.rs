@@ -51,6 +51,13 @@ impl AuthState {
         })
     }
 
+    /// Construct an `AuthState` with a fresh, cryptographically random
+    /// boot token. Used by `integration::start` because the server
+    /// will rotate the token into the connection-info file anyway.
+    pub fn new_with_random() -> Arc<Self> {
+        Self::new(fresh_token())
+    }
+
     /// Try to consume the boot token. On success returns a fresh session
     /// token; on failure returns `None` (token mismatch OR already used).
     pub fn consume_boot_token(&self, presented: &str) -> Option<String> {

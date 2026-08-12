@@ -1,11 +1,31 @@
-fix(chat): persist session on chat-done so reload shows the response
+feat(hci): post-auth frame loop + session file watcher
 
-The chat streaming path in llm_client.rs never calls save_session,
-so chat-mode responses only lived in the in-memory Zustand store.
-On reload, the session was re-read from disk without the new
-messages, so the response appeared to vanish.
+Makes the HCI server actually usable:
 
-The store already has a debounced auto-save (scheduleSave via
-useProjectLifecycle). chat-done now calls flushPendingSave() to
-force the write through immediately instead of waiting for the
-500ms debounce window.
+- server.rs: after auth, the per-connection task enters a
+  newline-delimited JSON-RPC frame loop and dispatches each frame
+  through the shared router. Closes the WP3 "router hook" that
+  was a stub.
+- server.rs: HciServer now holds an Arc<Router> + RpcContext.
+  Tests updated to pass them in.
+- integration.rs: HCI startup constructs the router and
+  RpcContext, threads the live Tauri AppState in so handlers
+  can see agents, sessions, and the in-flight map.
+- auth.rs: new_with_random() constructor for the integration path
+  (the integration owns the boot token, not the server).
+- session_watcher.rs (new): notify-based file watcher on
+  <workspace>/.harness/sessions/. Emits session-file-changed
+  Tauri event on Create/Modify(Data) of a .json file.
+- commands.rs: watch_session Tauri command starts/replaces the
+  watcher for a workspace. AppState now owns the active watcher
+  in a Mutex<Option<...>>.
+- ipc.ts: watchSession wrapper.
+- session-manager.ts: calls ipc.watchSession after loadProject
+  AND listens for session-file-changed to re-read the active
+  session from disk into the in-memory store.
+
+This is the live-reload fix for the chat-mode "response only
+shows after app restart" bug. The chat streaming path in Rust
+never persisted messages to disk; the frontend's
+flushPendingSave wrote them, but the in-memory store had no
+signal to re-fetch. The file watcher closes that loop.

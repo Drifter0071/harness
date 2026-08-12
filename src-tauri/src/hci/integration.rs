@@ -62,13 +62,10 @@ pub fn build_rpc_context(
     }
 }
 
-/// Start the HCI server. Returns `None` if disabled.
-///
-/// v0 takes no app-state argument: the server only needs to bind a
-/// port and write the connection-info file. The `RpcContext.app` is
-/// populated lazily when handlers are invoked via the Tauri IPC
-/// bridge (a follow-up that wires WebView→Rust state plumbing).
-pub async fn start() -> Result<Option<HciServer>, crate::hci::server::StartError> {
+/// Start the HCI server. Returns `None` if disabled. The `app` is
+/// threaded into the `RpcContext` so handlers can read the same
+/// `AppState` the Tauri IPC commands use.
+pub async fn start(app: Arc<AppState>) -> Result<Option<HciServer>, crate::hci::server::StartError> {
     if !hci_enabled_by_default() {
         return Ok(None);
     }
@@ -80,6 +77,9 @@ pub async fn start() -> Result<Option<HciServer>, crate::hci::server::StartError
             .ok()
             .map(std::path::PathBuf::from),
     };
-    let server = HciServer::start(cfg).await?;
+    let router = Arc::new(build_router());
+    let auth = AuthState::new_with_random();
+    let rpc_ctx = build_rpc_context(auth.clone(), app);
+    let server = HciServer::start(cfg, router, rpc_ctx).await?;
     Ok(Some(server))
 }
