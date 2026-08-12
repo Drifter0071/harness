@@ -1,4 +1,5 @@
 mod agent;
+mod agents;
 mod commands;
 mod llm_client;
 mod models;

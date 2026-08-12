@@ -205,7 +205,7 @@ const TITLE_MAX_LEN: usize = 80;
 
 // -- Path helpers --
 
-fn harness_dir(project_path: &str) -> PathBuf {
+pub(crate) fn harness_dir(project_path: &str) -> PathBuf {
     Path::new(project_path).join(".harness")
 }
 
