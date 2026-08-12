@@ -10,7 +10,7 @@ import { ModelSelect } from "./ModelSelect";
 import { formatMessagesForProvider } from "../lib/models";
 import { chatErrorActions } from "../lib/chat-errors";
 import { showToast } from "../lib/toast";
-import { startAgentTurn, cancelAgentTurn, respondApproval } from "../lib/session-manager";
+import { startAgentTurn, cancelAgentTurn, respondApproval, flushPendingSave } from "../lib/session-manager";
 import { Send, Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench } from "lucide-react";
 import type { SessionMessage, Mention } from "../lib/store";
 import type { ActionMode } from "../lib/ipc";
@@ -87,6 +87,12 @@ export function Chat() {
         console.log("[chat] done", e.requestId, "content_len", e.content.length);
         if (!st.streamingRequestId || e.requestId !== st.streamingRequestId) return;
         st.updateMessage(e.requestId, { content: e.content });
+
+        // Flush the debounced session save so the response is on disk
+        // even if the user reloads immediately. Without this, the chat
+        // streaming path in Rust bypasses persistence and the message
+        // only exists in the in-memory store.
+        flushPendingSave().catch(() => {});
 
         // Token telemetry (spec §7.5 step 4): cumulativeIn is the PEAK
         // input (`max`), cumulativeOut is a literal sum.

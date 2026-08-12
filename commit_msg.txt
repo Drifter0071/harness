@@ -1,7 +1,11 @@
-debug(chat): console.log on chunk/done/send in Chat.tsx
+fix(chat): persist session on chat-done so reload shows the response
 
-Adds three console.log calls to the chat streaming event handlers
-in Chat.tsx. No behavior change. Used to diagnose "model responds
-but UI only updates after reload" — the logs will reveal whether
-chat-chunk events are arriving, whether streamingRequestId matches,
-and whether the listener was registered in time.
+The chat streaming path in llm_client.rs never calls save_session,
+so chat-mode responses only lived in the in-memory Zustand store.
+On reload, the session was re-read from disk without the new
+messages, so the response appeared to vanish.
+
+The store already has a debounced auto-save (scheduleSave via
+useProjectLifecycle). chat-done now calls flushPendingSave() to
+force the write through immediately instead of waiting for the
+500ms debounce window.
