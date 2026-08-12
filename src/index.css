@@ -1,0 +1,276 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface-0: #000000;
+  --surface-1: #0a0a0a;
+  --surface-2: #111111;
+  --surface-3: #1a1a1a;
+  --white: #ffffff;
+  --white-50: rgba(255, 255, 255, 0.50);
+  --white-30: rgba(255, 255, 255, 0.30);
+  --white-15: rgba(255, 255, 255, 0.15);
+  --white-08: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --accent-green: #22c55e;
+  --accent-red: #ef4444;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--surface-0);
+  color: var(--white);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+::selection { background: rgba(255,255,255,0.12); }
+
+code, pre {
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", monospace;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes listItemEnter {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor-blink { animation: cursor-blink 1s step-end infinite; }
+
+.animate-fade-in { animation: fadeIn 0.15s ease-out; }
+.animate-slide-up { animation: slideUp 0.2s ease-out; }
+
+/* List-item stagger — up to 8 items, ~25ms each. */
+.animate-list-item { animation: listItemEnter 0.18s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-list-item {
+    animation: none;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════
+   Vitreous Liquid Quartz — design material
+   Semi-opaque, light-tinted frosted glass with edge-refracting
+   border highlights and slow, fluid interior illumination.
+   Designed to sit on the pure-black surface (--surface-0).
+
+   Usage:  <div class="glass-quartz">…</div>
+   Tune per element by overriding the --q-* custom properties.
+   NOTE: consumes both ::before and ::after — don't stack more
+   pseudo-element styles on the same element.
+   ════════════════════════════════════════════════════════════ */
+
+@property --quartz-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Registered so --q-tint can transition smoothly on hover */
+@property --q-tint {
+  syntax: "<color>";
+  initial-value: rgba(255, 255, 255, 0.035);
+  inherits: true;
+}
+
+.glass-quartz {
+  /* Material parameters — override per element if needed */
+  --q-radius: 12px;
+  --q-blur: 16px;
+  --q-tint: rgba(255, 255, 255, 0.035);
+  --q-speed: 16s;
+
+  position: relative;
+  isolation: isolate;
+  color: var(--white);
+  border: 1px solid transparent; /* the refracting ring lives in this hairline */
+  border-radius: var(--q-radius);
+  background-clip: padding-box;
+
+  /* Frosted, light-tinted body — silver-white translucency over black */
+  background:
+    radial-gradient(120% 90% at 12% 0%, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02) 45%, transparent 72%),
+    var(--q-tint);
+  -webkit-backdrop-filter: blur(var(--q-blur)) saturate(1.4);
+  backdrop-filter: blur(var(--q-blur)) saturate(1.4);
+
+  /* Glass slab: top catch-light + soft depth shadow over the black void */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 0 1px rgba(255, 255, 255, 0.04),
+    0 12px 36px rgba(0, 0, 0, 0.55);
+  transition:
+    --q-tint 240ms ease,
+    box-shadow 240ms ease,
+    transform 240ms ease;
+}
+
+/* Edge refraction — a conic ring of silver glints traveling
+   around the perimeter, like light bending at the glass edge */
+.glass-quartz::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--quartz-angle, 0deg),
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.60) 7%,
+    rgba(255, 255, 255, 0.10) 16%,
+    rgba(255, 255, 255, 0.03) 38%,
+    rgba(255, 255, 255, 0.38) 50%,
+    rgba(255, 255, 255, 0.07) 60%,
+    rgba(255, 255, 255, 0.02) 78%,
+    rgba(255, 255, 255, 0.55) 92%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.85;
+  transition: opacity 240ms ease;
+  animation: quartz-edge var(--q-speed) linear infinite;
+}
+
+/* Fluid illumination — a soft silver sheen drifting across the surface */
+.glass-quartz::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  background:
+    radial-gradient(42% 38% at 30% 22%, rgba(255, 255, 255, 0.12), transparent 72%),
+    radial-gradient(36% 32% at 76% 68%, rgba(255, 255, 255, 0.06), transparent 72%);
+  animation: quartz-sheen 18s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+@keyframes quartz-edge {
+  to { --quartz-angle: 360deg; }
+}
+
+@keyframes quartz-sheen {
+  0%   { transform: translate3d(-2%, -1%, 0) scale(1);       opacity: 0.60; }
+  50%  { transform: translate3d(1.5%, 1.5%, 0) scale(1.05); opacity: 0.95; }
+  100% { transform: translate3d(2.5%, -0.5%, 0) scale(1.02); opacity: 0.65; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-quartz {
+    transition: none;
+  }
+  .glass-quartz::before,
+  .glass-quartz::after {
+    animation: none;
+  }
+  button.glass-quartz:not(:disabled):hover {
+    transform: none;
+  }
+}
+
+/* ── Button variants ──────────────────────────────────────── */
+.glass-quartz--pill    { --q-radius: 999px; }
+.glass-quartz--compact { --q-radius: 8px; }
+.glass-quartz--strong  { --q-tint: rgba(255, 255, 255, 0.08); }
+
+button.glass-quartz {
+  cursor: pointer;
+  /* Quiet at rest: the fill is barely there; it blooms in on hover */
+  --q-tint: rgba(255, 255, 255, 0.012);
+}
+button.glass-quartz:not(:disabled):hover {
+  --q-tint: rgba(255, 255, 255, 0.09);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 0 1px rgba(255, 255, 255, 0.08),
+    0 14px 40px rgba(0, 0, 0, 0.65);
+}
+button.glass-quartz:not(:disabled):hover::before { opacity: 1; }
+button.glass-quartz:not(:disabled):active {
+  transform: scale(0.96);
+  transition-duration: 120ms;
+}
+button.glass-quartz:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+button.glass-quartz:disabled::before,
+button.glass-quartz:disabled::after { animation: none; }
+button.glass-quartz:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+}
+
+/* ── Glass Mist — very transparent companion to glass-quartz ──
+   Same frosted family, but barely-there: ~2% white fill, lighter
+   blur, static hairline edge. No animated ring or sheen, and it
+   keeps ::before / ::after free for consumers.
+   Usage:  <div class="glass-mist">…</div>
+   Tune:   --m-radius · --m-blur · --m-tint                     */
+.glass-mist {
+  --m-radius: 12px;
+  --m-blur: 14px;
+  --m-tint: rgba(255, 255, 255, 0.02);
+
+  isolation: isolate;
+  color: var(--white);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--m-radius);
+  background: var(--m-tint);
+  -webkit-backdrop-filter: blur(var(--m-blur)) saturate(1.3);
+  backdrop-filter: blur(var(--m-blur)) saturate(1.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 0 1px rgba(255, 255, 255, 0.03),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: border-color 150ms ease;
+}
+
+.glass-mist--pill { --m-radius: 999px; }
+
+.glass-mist:hover { border-color: rgba(255, 255, 255, 0.11); }
+.glass-mist:focus-within { border-color: rgba(255, 255, 255, 0.18); }
+
+

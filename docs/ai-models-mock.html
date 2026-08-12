@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AI Models — Layout Mock</title>
+<style>
+  :root {
+    --bg: #000;
+    --surface-0: #000;
+    --surface-1: #0a0a0a;
+    --surface-2: #111;
+    --surface-3: #1a1a1a;
+    --border-subtle: rgba(255,255,255,0.08);
+    --border-default: rgba(255,255,255,0.12);
+    --border-strong: rgba(255,255,255,0.20);
+    --text: #e4e4e7;
+    --text-50: #a1a1aa;
+    --text-30: #71717a;
+    --text-15: #3f3f46;
+    --accent: #22c55e;
+    --warning: #eab308;
+    --error: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+  /* Top bar shell (the existing ActiveJobBar lives in the center) */
+  .topbar {
+    position: relative;
+    height: 52px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .topbar .center { color: var(--text-30); font-size: 11px; }
+  .topbar .right {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+  /* Stats panel */
+  .stats {
+    background: var(--surface-1);
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-width: 180px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .stats .row .k { color: var(--text-30); }
+  .stats .row .v { color: var(--text); font-weight: 500; }
+  .stats .row .v.dim { color: var(--text-50); font-weight: 400; }
+  .stats hr {
+    border: 0;
+    border-top: 1px solid var(--border-subtle);
+    margin: 6px -12px;
+  }
+  /* Chat shell mock */
+  .shell {
+    max-width: 720px;
+    margin: 32px auto;
+    padding: 0 16px;
+  }
+  .msg {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .msg .role { font-size: 11px; color: var(--text-30); margin-bottom: 4px; }
+  .msg .body { color: var(--text); }
+  .msg.user .body {
+    background: var(--surface-3);
+    border-radius: 16px;
+    padding: 10px 14px;
+    display: inline-block;
+    max-width: 80%;
+    margin-left: auto;
+    float: right;
+    clear: both;
+  }
+  /* Chat input + selector row */
+  .composer {
+    margin-top: 32px;
+    background: var(--surface-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 8px;
+  }
+  .selector-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--text-50);
+  }
+  .selector-row .group { display: flex; align-items: center; gap: 6px; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    color: var(--text);
+    font-size: 11px;
+  }
+  .pill .chev { color: var(--text-30); font-size: 9px; }
+  .pill.off { color: var(--text-30); }
+  .pill.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-50);
+  }
+  .toggle .switch {
+    width: 22px; height: 12px;
+    background: var(--surface-3);
+    border-radius: 6px;
+    position: relative;
+    border: 1px solid var(--border-default);
+  }
+  .toggle .switch::after {
+    content: "";
+    position: absolute;
+    width: 8px; height: 8px;
+    background: var(--text-30);
+    border-radius: 50%;
+    top: 1px; left: 1px;
+    transition: all .15s;
+  }
+  .toggle.on .switch { background: var(--accent); border-color: var(--accent); }
+  .toggle.on .switch::after { left: 11px; background: #000; }
+  textarea {
+    width: 100%;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    padding: 10px 12px;
+    resize: none;
+    min-height: 48px;
+    font: 13px/1.5 inherit;
+    outline: none;
+  }
+  .actions { display: flex; justify-content: flex-end; padding: 4px 6px 2px; }
+  .send {
+    background: var(--surface-3);
+    border: 1px solid var(--border-default);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+  .hint { color: var(--text-15); font-size: 10px; text-align: center; margin-top: 6px; }
+  .label { color: var(--text-15); text-transform: uppercase; letter-spacing: 0.04em; font-size: 9px; }
+</style>
+</head>
+<body>
+  <!-- Top bar with center job bar (existing) and right stats panel (new) -->
+  <header class="topbar">
+    <div class="center">● Active job bar (existing)</div>
+    <div class="right">
+      <div class="stats" aria-label="Token statistics">
+        <div class="row"><span class="k">Last response</span><span class="v">2,341 in / 287 out</span></div>
+        <div class="row"><span class="k">Context used</span><span class="v">12,400</span></div>
+        <div class="row"><span class="k">Context window</span><span class="v dim">200,000</span></div>
+        <hr/>
+        <div class="row"><span class="k">Session window</span><span class="v">23% (4h 12m)</span></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <div class="msg user">
+      <div class="body">Explain @src/auth/login.ts</div>
+    </div>
+    <div class="msg">
+      <div class="role">Orchestrator</div>
+      <div class="body">The login flow validates the credentials against the user store, then issues a session token via the <code>issueSession</code> helper. (stub response today)</div>
+    </div>
+
+    <!-- Composer with model selector + thinking toggle row -->
+    <div class="composer">
+      <div class="selector-row">
+        <div class="group">
+          <span class="label">Model</span>
+          <span class="pill">claude-sonnet-4-20250514 <span class="chev">▾</span></span>
+        </div>
+        <div class="group">
+          <span class="label">Format</span>
+          <span class="pill off">Anthropic Messages</span>
+        </div>
+        <div class="group" style="margin-left:auto">
+          <span class="toggle on">
+            <span class="switch"></span>
+            Thinking
+          </span>
+          <span class="pill">budget 4096 <span class="chev">▾</span></span>
+        </div>
+      </div>
+      <textarea placeholder="Message Harness... (type @ to mention a file)"></textarea>
+      <div class="actions">
+        <button class="send">Send</button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for new line · @ to mention files</div>
+    </div>
+  </div>
+</body>
+</html>
