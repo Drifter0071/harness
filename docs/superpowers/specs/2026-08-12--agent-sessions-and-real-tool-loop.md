@@ -198,7 +198,9 @@ Frontend debounced save (existing `session-manager.ts`) reworks to track **activ
 
 ### 6.1 `agent_loop.rs` — the turn loop
 
-`run_agent_turn` spawns a tokio task (same pattern as `chat_complete`):
+**The agent loop is the session's chat path.** The composer's submit path switches from `chat_complete` to `run_agent_turn` — every user message in a session is processed by the harness agent with tools. `chat_complete` / `chatEvents` stay registered for backward compatibility but are no longer used by the session UI (the `/search` command keeps its direct `web_search` IPC call). The Chat component's event subscription switches to the agent event family (§7).
+
+`run_agent_turn` spawns a tokio task (same pattern as `chat_complete`). `AppState` gains `pending_approvals: DashMap<String, oneshot::Sender<bool>>` for the policy gate:
 
 1. Build provider messages: system prompt (session agent's `systemPrompt` + workspace root path + tool usage guidance) + session history (excluding `activities`; assistant tool-call history is reconstructed from the loop's own turn state, not from persisted messages — persisted messages stay human-readable).
 2. Call `llm_client::complete_with_tools(model_id, messages, tools, thinking/reasoning prefs, cancel_rx)`.
@@ -240,6 +242,7 @@ New function `complete_with_tools` (sibling of `run_chat`, shares `resolve`, err
 - **OpenAI (`openai-chat-completions`):** add `"tools": [{ "type": "function", "function": { name, description, parameters } }]` to the request body. Aggregate streamed `choices[].delta.tool_calls` (index-keyed: id, name, `arguments` JSON fragment concatenation) while still streaming `content` deltas. `finish_reason == "tool_calls"` → return the aggregated calls. Tool results are appended as a `"role": "tool"` message with `tool_call_id`.
 - **Anthropic (`anthropic-messages`):** add `"tools": [{ name, description, input_schema }]`. Aggregate SSE `content_block_start` (`type: tool_use`, captures id + name), `content_block_delta` (`input_json_delta` partial_json concatenation), `content_block_stop`. If any tool_use blocks were captured, return them instead of emitting `chat-done`. Tool results are sent back as a `"user"` message with `content: [{ type: "tool_result", tool_use_id, content }]` per the Anthropic API.
 - Text deltas keep streaming through a callback so the UI stays live during reasoning between tool calls.
+- **System prompt mapping:** the system prompt is provider-mapped — OpenAI receives it as a `system` role message; Anthropic receives it as the top-level `system` field (never as a `user`/`assistant` message).
 - Existing `run_chat` stays for the plain-chat path; `complete_with_tools` is a parallel function (no regressions to the current chat UX).
 
 ### 6.4 Goal loop
@@ -280,7 +283,7 @@ Wires the existing shell to real data: `list_sessions(projectPath)` on project o
 
 Same chrome as `Settings` (backdrop `bg-black/70`, panel `bg-surface-1 border border-border-subtle rounded-lg`, `animate-fade-in`). Opened from the job bar (new gear-menu entry or a dedicated icon) and from a "Manage agents" link in the composer area.
 
-Contents: roster list (name, role badge, builtin tag, delete for non-builtin) · edit form (name, role select, system prompt textarea) · **New personality** button · **Max agents per session** number input. Every change saves to `agents.json` via `save_agent_roster`. The manager is read-only-aware: if no project is open, it shows the empty state with the standard copy and opens disabled.
+Contents: roster list (name, role badge, builtin tag, delete for non-builtin) · edit form (name, role select, system prompt textarea) · **New personality** button · **Max agents per session** number input · **Default personality for new sessions** selector (radio on the roster list; `create_session` uses it when no `agentId` is passed). Every change saves to `agents.json` via `save_agent_roster`. The manager is read-only-aware: if no project is open, it shows the empty state with the standard copy and opens disabled.
 
 ### 8.3 Composer options row (Chat)
 
