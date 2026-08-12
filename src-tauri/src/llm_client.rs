@@ -202,12 +202,14 @@ fn emit_error(
     error: impl Into<String>,
     retry_after: Option<u64>,
 ) {
+    let err_str: String = error.into();
+    eprintln!("[hci:debug] chat-error request_id={request_id} kind={kind} msg={err_str}");
     let _ = app.emit(
         "chat-error",
         ChatError {
             request_id: request_id.to_string(),
             kind: kind.to_string(),
-            error: error.into(),
+            error: err_str,
             retry_after_seconds: retry_after,
         },
     );
@@ -583,6 +585,13 @@ async fn run_openai(
 ) -> Result<(), String> {
     let client = build_client()?;
     let url = format!("{}/chat/completions", resolved.base_url);
+    eprintln!(
+        "[hci:debug] run_openai url={url} model={} key_len={} msg_count={} reasoning={:?}",
+        resolved.record.model_name,
+        resolved.api_key.len(),
+        request.messages.len(),
+        request.reasoning_effort,
+    );
 
     let mut include_reasoning = request.reasoning_effort.is_some();
 
@@ -640,6 +649,10 @@ async fn run_openai(
             } else {
                 None
             };
+            eprintln!(
+                "[hci:debug] run_openai HTTP {status_code} body={}",
+                body_excerpt(&body_text)
+            );
             emit_error(
                 app,
                 &request.request_id,
@@ -663,6 +676,7 @@ async fn run_openai(
         let mut cancelled = false;
         let mut provider_err: Option<String> = None;
         let mut stream_err: Option<String> = None;
+        eprintln!("[hci:debug] run_openai stream open, awaiting first byte");
         loop {
             let chunk_fut = stream.next();
             tokio::select! {
@@ -672,8 +686,11 @@ async fn run_openai(
                     let Some(chunk_res) = maybe else { break };
                     let chunk: Bytes = match chunk_res {
                         Ok(c) => c,
-                        Err(e) => { stream_err = Some(e.to_string()); break; }
+                        Err(e) => { eprintln!("[hci:debug] run_openai stream error: {e}"); stream_err = Some(e.to_string()); break; }
                     };
+                    if full_content.is_empty() && !chunk.is_empty() {
+                        eprintln!("[hci:debug] run_openai first chunk ({} bytes)", chunk.len());
+                    }
                     buffer.push_str(&String::from_utf8_lossy(&chunk));
                     while let Some(line) = take_sse_data_line(&mut buffer) {
                         if line == "[DONE]" { done = true; break; }

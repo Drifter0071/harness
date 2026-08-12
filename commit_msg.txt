@@ -1,6 +1,8 @@
-refactor(hci): make method handlers async; remove block_on
+debug(chat): eprintln diagnostics in run_openai path
 
-MethodHandler.handle is now async fn via async_trait. Router.handle_request
-is async. Split dispatch so notifications return None per JSON-RPC 2.0.
-Workspace/session/canvas handlers await commands directly instead of
-block_on inside tokio (which was deadlocking in test runs).
+Adds stderr prints at: start of run_openai (url/model/key_len/msg_count),
+HTTP error path (status + body excerpt), stream first-byte arrival,
+stream errors, and emit_error call. No behavior change — pure logging.
+
+Use to debug Xiaomi MiMo v2.5 via Kilo AI gateway not returning
+any tokens (Agent working activates, model doesn't respond).
