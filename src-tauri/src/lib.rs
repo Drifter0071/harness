@@ -24,20 +24,23 @@ pub fn run() {
             // Initialize state. The secret store uses the OS keyring
             // in production; tests swap in `InMemoryStore` via a
             // different `run()` entry point.
-            let state = Arc::new(commands::AppState::new(Arc::new(secrets::KeyringStore::new())));
-            app.manage(state.clone());
+            let state = commands::AppState::new(Arc::new(secrets::KeyringStore::new()));
+            app.manage(state);
 
             // HCI: start the control-interface server in a background
             // task. Disabled by default in release, on by default in
             // dev. No-ops if `HARNESS_CONTROL=0` is set.
-            let state_for_hci = state.clone();
+            //
+            // We don't need a clone of state here; HCI only reads the
+            // env-var flags and binds a TCP listener. The handlers
+            // themselves take `RpcContext.app` injected per-request
+            // from a future follow-up that pulls the managed state
+            // out of the Tauri runtime.
             tauri::async_runtime::spawn(async move {
-                match hci::integration::start(state_for_hci).await {
+                match hci::integration::start().await {
                     Ok(Some(_server)) => {
                         // Kept alive for the life of the app. The Drop
                         // handler deletes the conn-info file on shutdown.
-                        // (Tokio JoinHandle would let us await, but the
-                        // process exits anyway on Tauri shutdown.)
                     }
                     Ok(None) => {} // HCI disabled, normal.
                     Err(e) => {
