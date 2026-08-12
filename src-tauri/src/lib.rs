@@ -60,12 +60,23 @@ pub fn run() {
             commands::cancel_chat,
             // Sessions + recents + project opening (Phase 1.5 spec)
             commands::pick_project_folder,
+            commands::list_sessions,
+            commands::create_session,
             commands::load_session,
             commands::save_session,
+            commands::rename_session,
+            commands::delete_session,
+            commands::set_active_session,
             commands::list_recent_projects,
             commands::forget_recent_project,
             commands::touch_recent_project,
             commands::list_files_recursive,
+            // Agent roster + turn loop (agent-sessions spec)
+            commands::load_agent_roster,
+            commands::save_agent_roster,
+            commands::run_agent_turn,
+            commands::respond_approval,
+            commands::cancel_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Harness");

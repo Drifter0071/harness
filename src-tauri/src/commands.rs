@@ -21,6 +21,13 @@ pub struct AppState {
     /// `cancel_chat` to abort an in-progress SSE stream. Wrapped in
     /// `Arc` because `DashMap` itself isn't `Clone`.
     pub in_flight: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<()>>>,
+    /// In-flight agent turns, keyed by the turn's `request_id`. `cancel_agent`
+    /// flips the watch to abort the loop at its next await point.
+    pub agent_in_flight: Arc<dashmap::DashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Pending tool approvals, keyed by `request_id` (one pending approval per
+    /// running turn — tools execute sequentially). `respond_approval` resolves
+    /// them.
+    pub pending_approvals: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 impl AppState {
@@ -29,6 +36,8 @@ impl AppState {
             agents: Mutex::new(HashMap::new()),
             secrets,
             in_flight: Arc::new(dashmap::DashMap::new()),
+            agent_in_flight: Arc::new(dashmap::DashMap::new()),
+            pending_approvals: Arc::new(dashmap::DashMap::new()),
         }
     }
 }
@@ -324,10 +333,124 @@ pub async fn pick_project_folder(app: tauri::AppHandle) -> Result<Option<String>
 }
 
 #[tauri::command]
-pub async fn load_session(project_path: String) -> Result<Option<crate::session::Session>, String> {
-    // Temporary shim: resolves the active session for the project. Replaced
-    // by the 2-arg (projectPath, sessionId) command in WP6.
-    crate::session::load_active_session(&project_path).await
+pub async fn load_session(
+    project_path: String,
+    session_id: String,
+) -> Result<Option<crate::session::Session>, String> {
+    crate::session::load_session(&project_path, &session_id).await
+}
+
+#[tauri::command]
+pub async fn list_sessions(
+    project_path: String,
+) -> Result<Vec<crate::session::SessionSummary>, String> {
+    crate::session::list_sessions(&project_path).await
+}
+
+#[tauri::command]
+pub async fn create_session(
+    project_path: String,
+    agent: Option<crate::session::AgentSnapshot>,
+) -> Result<crate::session::Session, String> {
+    crate::session::create_session(&project_path, agent).await
+}
+
+#[tauri::command]
+pub async fn rename_session(
+    project_path: String,
+    session_id: String,
+    title: String,
+) -> Result<crate::session::SessionSummary, String> {
+    crate::session::rename_session(&project_path, &session_id, title).await
+}
+
+#[tauri::command]
+pub async fn delete_session(project_path: String, session_id: String) -> Result<(), String> {
+    crate::session::delete_session(&project_path, &session_id).await
+}
+
+#[tauri::command]
+pub async fn set_active_session(project_path: String, session_id: String) -> Result<(), String> {
+    crate::session::set_active_session(&project_path, &session_id).await
+}
+
+#[tauri::command]
+pub async fn load_agent_roster(project_path: String) -> Result<crate::agents::AgentRoster, String> {
+    crate::agents::load_agent_roster(&project_path).await
+}
+
+#[tauri::command]
+pub async fn save_agent_roster(
+    project_path: String,
+    roster: crate::agents::AgentRoster,
+) -> Result<crate::agents::AgentRoster, String> {
+    crate::agents::save_agent_roster(&project_path, &roster).await
+}
+
+// ============================= Agent turn loop =============================
+
+/// Kick off one agent turn for a session. Returns immediately; progress
+/// streams back through `agent-*` app events routed by `requestId`.
+#[tauri::command]
+pub async fn run_agent_turn(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request_id: String,
+    session_id: String,
+    model_id: String,
+    message: String,
+    action_mode: crate::session::ActionMode,
+    goal_mode: bool,
+    workspace: String,
+) -> Result<(), String> {
+    let session = crate::session::load_session(&workspace, &session_id)
+        .await?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+
+    let sink: Arc<dyn crate::agent_loop::AgentEventSink> =
+        Arc::new(crate::agent_loop::AppEventSink::new(app));
+    let completer: Arc<dyn crate::agent_loop::TurnCompleter> = Arc::new(
+        crate::agent_loop::LlmClientTurner::new(state.secrets.clone()),
+    );
+
+    crate::agent_loop::run_agent_turn(
+        request_id,
+        session,
+        model_id,
+        message,
+        action_mode,
+        goal_mode,
+        workspace,
+        sink,
+        state.pending_approvals.clone(),
+        state.agent_in_flight.clone(),
+        completer,
+    );
+    Ok(())
+}
+
+/// Resolve a pending tool approval. No-op when the request has no pending
+/// approval (already answered or the turn ended).
+#[tauri::command]
+pub async fn respond_approval(
+    request_id: String,
+    allow: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some((_, tx)) = state.pending_approvals.remove(&request_id) {
+        let _ = tx.send(allow);
+    }
+    Ok(())
+}
+
+/// Cancel a running agent turn by its `request_id`. The loop resolves any
+/// pending approval as denied and emits `agent-error kind:"cancelled"`.
+#[tauri::command]
+pub async fn cancel_agent(request_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some((_, tx)) = state.agent_in_flight.remove(&request_id) {
+        let _ = tx.send(true);
+    }
+    Ok(())
 }
 
 #[tauri::command]
