@@ -211,7 +211,10 @@ async function loadProject(path: string): Promise<void> {
 
 /** Start one agent turn: append the user message + assistant placeholder,
  *  register the requestId, and kick off the Rust loop. */
-export async function startAgentTurn(text: string): Promise<void> {
+export async function startAgentTurn(
+  text: string,
+  mentions?: { path: string; lineStart?: number; lineEnd?: number }[]
+): Promise<void> {
   const st = useStore.getState();
   if (!st.workspacePath || !st.activeSessionId || !st.activeModelId) return;
   if (st.agentRequestId) return; // a turn is already running
@@ -220,7 +223,13 @@ export async function startAgentTurn(text: string): Promise<void> {
   const now = new Date().toISOString();
   const agent = currentAgent ?? fallbackAgent();
 
-  st.appendMessage({ id: requestId, role: "user", content: text, timestamp: now });
+  st.appendMessage({
+    id: requestId,
+    role: "user",
+    content: text,
+    timestamp: now,
+    mentions: mentions && mentions.length > 0 ? mentions : undefined,
+  });
   st.appendMessage({
     id: `agent-${requestId}`,
     role: "assistant",

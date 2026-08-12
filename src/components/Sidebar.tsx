@@ -9,6 +9,8 @@ import {
   PanelLeftOpen,
   History,
   X,
+  Plus,
+  Bot,
 } from "lucide-react";
 
 // ── Layout constants ─────────────────────────────────────────────────────
@@ -245,6 +247,7 @@ function SessionsPanel() {
     activeSessionId,
     setActiveSessionId,
     workspacePath,
+    setAgentManagerOpen,
   } = useStore();
 
   useEffect(() => {
@@ -256,6 +259,26 @@ function SessionsPanel() {
       .then(setSessions)
       .catch(() => setSessions([]));
   }, [workspacePath, setSessions]);
+
+  const handleNewSession = async () => {
+    if (!workspacePath) return;
+    try {
+      const created = await ipc.createSession(workspacePath);
+      setSessions([...(sessions ?? []), {
+        id: created.id,
+        projectPath: created.projectPath,
+        projectName: workspacePath.split(/[\\/]/).pop() ?? workspacePath,
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+        messageCount: 0,
+        title: created.title,
+        agentId: created.agent.id,
+      }]);
+      setActiveSessionId(created.id);
+    } catch (err) {
+      console.error("Failed to create session:", err);
+    }
+  };
 
   const handleForget = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -275,6 +298,26 @@ function SessionsPanel() {
       icon={<History size={10} className="text-white-30 flex-shrink-0" />}
       count={sessions.length}
       grow
+      trailing={
+        <div className="flex items-center gap-0.5">
+          {workspacePath && (
+            <button
+              onClick={handleNewSession}
+              className="p-1 text-white-30 hover:text-white transition-colors"
+              title="New session"
+            >
+              <Plus size={11} />
+            </button>
+          )}
+          <button
+            onClick={() => setAgentManagerOpen(true)}
+            className="p-1 text-white-30 hover:text-white transition-colors"
+            title="Agent Manager"
+          >
+            <Bot size={11} />
+          </button>
+        </div>
+      }
     >
       {/* Body — Sessions is the panel that grows to fill the column.
           Scrolls inside if the list is long. */}

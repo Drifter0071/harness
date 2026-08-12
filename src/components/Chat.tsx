@@ -10,8 +10,10 @@ import { ModelSelect } from "./ModelSelect";
 import { formatMessagesForProvider } from "../lib/models";
 import { chatErrorActions } from "../lib/chat-errors";
 import { showToast } from "../lib/toast";
-import { Send, Loader2, Square, Settings, RefreshCw } from "lucide-react";
+import { startAgentTurn, cancelAgentTurn, respondApproval } from "../lib/session-manager";
+import { Send, Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench } from "lucide-react";
 import type { SessionMessage, Mention } from "../lib/store";
+import type { ActionMode } from "../lib/ipc";
 
 const nowIso = () => new Date().toISOString();
 
@@ -23,6 +25,12 @@ type ComposerState =
   | "streaming"
   | "ready";
 
+const ACTION_MODES: { value: ActionMode; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Run all tools without asking" },
+  { value: "askRisky", label: "Ask risky", hint: "Ask before writes and commands" },
+  { value: "askAll", label: "Ask all", hint: "Ask before every tool call" },
+];
+
 export function Chat() {
   const { messages, appendMessage, setJobActivities, workspacePath } = useStore();
   const [input, setInput] = useState("");
@@ -32,6 +40,15 @@ export function Chat() {
 
   // Keep the latest streaming requestId without re-subscribing.
   const streamingRequestId = useStore((s) => s.streamingRequestId);
+  const agentRequestId = useStore((s) => s.agentRequestId);
+  const pendingApproval = useStore((s) => s.pendingApproval);
+  const activities = useStore((s) => s.activities);
+  const actionMode = useStore((s) => s.actionMode);
+  const setActionMode = useStore((s) => s.setActionMode);
+  const goalMode = useStore((s) => s.goalMode);
+  const setGoalMode = useStore((s) => s.setGoalMode);
+  const sessionLoaded = useStore((s) => s.sessionLoaded);
+  const activeSessionId = useStore((s) => s.activeSessionId);
   const savedModels = useStore((s) => s.savedModels);
   const activeModelId = useStore((s) => s.activeModelId);
   const modelPrefs = useStore((s) => s.modelPrefs);
@@ -131,7 +148,7 @@ export function Chat() {
 
   const handleSubmit = async (textOverride?: string, mentionsOverride?: Mention[]) => {
     const text = (textOverride ?? input).trim();
-    if (!text || isProcessing || streamingRequestId) return;
+    if (!text || isProcessing || streamingRequestId || agentRequestId) return;
     const mentions = mentionsOverride ?? extractMentions(text);
     if (!textOverride) setInput("");
 
@@ -144,6 +161,14 @@ export function Chat() {
     const st = useStore.getState();
     const model = st.savedModels.find((m) => m.id === st.activeModelId) ?? null;
     if (!model) return;
+
+    // Agent mode: the Rust-owned loop (workspace sessions). Requires an
+    // open project with a session.
+    if (st.workspacePath && st.activeSessionId) {
+      setJobActivities(["Agent working..."]);
+      await startAgentTurn(text, mentions);
+      return;
+    }
 
     const userMsg: SessionMessage = {
       id: nanoid(),
@@ -184,7 +209,9 @@ export function Chat() {
 
   const handleCancel = async () => {
     const st = useStore.getState();
-    if (st.streamingRequestId) {
+    if (st.agentRequestId) {
+      await cancelAgentTurn();
+    } else if (st.streamingRequestId) {
       await ipc.cancelChat(st.streamingRequestId).catch(() => {});
     }
   };
@@ -216,7 +243,7 @@ export function Chat() {
   };
 
   // ── Composer disabled state (spec §7.4) ──
-  const composerState: ComposerState = streamingRequestId
+  const composerState: ComposerState = streamingRequestId || agentRequestId
     ? "streaming"
     : !activeModel
       ? "noActive"
@@ -268,7 +295,9 @@ export function Chat() {
 
   const placeholder =
     composerState === "streaming"
-      ? "Streaming..."
+      ? agentRequestId
+        ? "Agent working..."
+        : "Streaming..."
       : composerState === "noActive"
         ? "Add a model in Settings to start"
         : composerState === "noKey" || composerState === "auth"
@@ -348,6 +377,100 @@ export function Chat() {
                   </select>
                 </label>
               )}
+            </div>
+          )}
+
+          {/* Agent options row (spec §4.2): action-mode gate + goal mode.
+              Only meaningful when an agent session is open. */}
+          {composerState !== "noActive" && workspacePath && activeSessionId && (
+            <div className="flex items-center gap-3 mb-2 select-none">
+              <span className="text-[11px] text-white-30">Actions:</span>
+              <div className="flex items-center bg-surface-2 border border-border-subtle rounded overflow-hidden">
+                {ACTION_MODES.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    title={m.hint}
+                    onClick={() => setActionMode(m.value)}
+                    className={`px-2 py-0.5 text-[11px] transition-colors ${
+                      actionMode === m.value
+                        ? "bg-surface-4 text-white"
+                        : "text-white-30 hover:text-white"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-1.5 ml-auto cursor-pointer">
+                <Target size={12} className={goalMode ? "text-status-active" : "text-white-30"} />
+                <span className="text-[11px] text-white-50">Goal</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={goalMode}
+                  onClick={() => setGoalMode(!goalMode)}
+                  className={`w-7 h-4 rounded-full transition-colors relative ${
+                    goalMode ? "bg-status-active" : "bg-surface-4"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[2px] w-3 h-3 rounded-full bg-white transition-all ${
+                      goalMode ? "left-[14px]" : "left-[2px]"
+                    }`}
+                  />
+                </button>
+              </label>
+            </div>
+          )}
+
+          {/* Live tool activity feed (last 4, spec §4.1) while a turn runs */}
+          {agentRequestId && activities.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              {activities.slice(-4).map((a) => (
+                <div key={a.id} className="flex items-center gap-1.5 text-[10px] text-white-30 min-w-0">
+                  <Wrench size={10} className="shrink-0 text-white-15" />
+                  <span
+                    className={`shrink-0 font-medium ${
+                      a.status === "ran"
+                        ? "text-status-active"
+                        : a.status === "denied"
+                          ? "text-status-warning"
+                          : "text-status-error"
+                    }`}
+                  >
+                    {a.tool}
+                  </span>
+                  <span className="truncate max-w-[220px]">{a.summary}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Pending tool approval (spec §4.3): Allow / Deny gate */}
+          {pendingApproval && (
+            <div className="flex items-center gap-2.5 mb-2 bg-surface-2 border border-border-subtle rounded px-3 py-2 animate-fade-in">
+              <ShieldCheck size={15} className="text-status-warning shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] text-white font-medium truncate">{pendingApproval.name}</div>
+                <div className="text-[11px] text-white-30 truncate">{pendingApproval.summary}</div>
+              </div>
+              <button
+                onClick={() => respondApproval(true)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded bg-status-active text-black text-[11px] font-medium hover:opacity-90 transition-opacity"
+                title="Allow this tool call"
+              >
+                <Check size={12} />
+                Allow
+              </button>
+              <button
+                onClick={() => respondApproval(false)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded bg-surface-4 text-white-50 text-[11px] hover:text-status-error transition-colors"
+                title="Deny this tool call"
+              >
+                <X size={12} />
+                Deny
+              </button>
             </div>
           )}
 

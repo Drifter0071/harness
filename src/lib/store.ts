@@ -131,6 +131,8 @@ interface HarnessState {
   /** Roster for the Agent Manager window; loaded per project. */
   agentRoster: import("./ipc").AgentRoster | null;
   setAgentRoster: (roster: import("./ipc").AgentRoster | null) => void;
+  agentManagerOpen: boolean;
+  setAgentManagerOpen: (open: boolean) => void;
 
   // Saved models + active model + telemetry (Phase 2.0)
   savedModels: import("./ipc").SavedModel[];
@@ -251,6 +253,8 @@ export const useStore = create<HarnessState>((set) => ({
   setPendingApproval: (p) => set({ pendingApproval: p }),
   agentRoster: null,
   setAgentRoster: (roster) => set({ agentRoster: roster }),
+  agentManagerOpen: false,
+  setAgentManagerOpen: (open) => set({ agentManagerOpen: open }),
 
   // Saved models + active model + telemetry (Phase 2.0)
   savedModels: [],

@@ -4,13 +4,14 @@ import { DynamicCanvas } from "./components/DynamicCanvas";
 import { Sidebar } from "./components/Sidebar";
 import { Settings } from "./components/Settings";
 import { Chat } from "./components/Chat";
+import { AgentManager } from "./components/AgentManager";
 import { useStore } from "./lib/store";
 import { useProjectLifecycle, flushPendingSave } from "./lib/session-manager";
 import { useModelBootstrap } from "./lib/model-bootstrap";
 import { ToastHost } from "./lib/toast";
 
 function App() {
-  const { settingsOpen, canvasPanels } = useStore();
+  const { settingsOpen, canvasPanels, agentManagerOpen } = useStore();
   useProjectLifecycle();
   useModelBootstrap();
 
@@ -35,6 +36,7 @@ function App() {
         </div>
       </div>
       {settingsOpen && <Settings />}
+      {agentManagerOpen && <AgentManager />}
       <ToastHost />
     </div>
   );
