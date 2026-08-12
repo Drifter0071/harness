@@ -1,0 +1,6 @@
+refactor(hci): make method handlers async; remove block_on
+
+MethodHandler.handle is now async fn via async_trait. Router.handle_request
+is async. Split dispatch so notifications return None per JSON-RPC 2.0.
+Workspace/session/canvas handlers await commands directly instead of
+block_on inside tokio (which was deadlocking in test runs).

@@ -1,13 +1,4 @@
 //! Read-tier handlers for `workspace.*`.
-//!
-//! Backed by the existing `commands::read_file`, `commands::list_directory`,
-//! `commands::search_files`, `commands::list_files_recursive`. All paths
-//! are validated against the active workspace via `tools::resolve_within`.
-//!
-//! v0 caps (spec §2.3):
-//! - `workspace.read` refuses files > 5 MB.
-//! - `workspace.list` caps depth at 8.
-//! - `workspace.search` caps results at 200.
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -16,23 +7,16 @@ use crate::commands;
 use crate::hci::router::{ConnectionCtx, MethodHandler, MethodTier, RpcContext, RouterError};
 use crate::tools;
 
-/// 5 MB. Files larger than this are refused by `workspace.read` to
-/// protect the WebView from accidental huge reads.
 const READ_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const LIST_MAX_DEPTH: usize = 8;
 const SEARCH_MAX_RESULTS: usize = 200;
 
-fn app_required(ctx: &RpcContext) -> Result<&crate::commands::AppState, RouterError> {
-    ctx.app.as_ref().map(|a| a.as_ref()).ok_or_else(|| {
-        RouterError::Internal("app state unavailable (HCI running outside Tauri)".into())
-    })
-}
-
 pub struct ListHandler;
+#[async_trait::async_trait]
 impl MethodHandler for ListHandler {
     fn name(&self) -> &'static str { "workspace.list" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         params: Value,
         _ctx: &RpcContext,
@@ -43,11 +27,7 @@ impl MethodHandler for ListHandler {
         let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
         let depth = depth.min(LIST_MAX_DEPTH);
 
-        // Use list_files_recursive and truncate by depth. The existing
-        // command has its own depth cap; we re-enforce here as a second
-        // line of defense.
-        let all = tokio::runtime::Handle::current()
-            .block_on(commands::list_files_recursive(workspace.to_string()))
+        let all = commands::list_files_recursive(workspace.to_string()).await
             .map_err(RouterError::Internal)?;
         let total = all.len();
 
@@ -57,10 +37,7 @@ impl MethodHandler for ListHandler {
             if let Ok(rel) = Path::new(&p).strip_prefix(root) {
                 let components = rel.components().count();
                 if components <= depth {
-                    entries.push(json!({
-                        "path": p,
-                        "depth": components,
-                    }));
+                    entries.push(json!({ "path": p, "depth": components }));
                 }
             }
         }
@@ -69,10 +46,11 @@ impl MethodHandler for ListHandler {
 }
 
 pub struct ReadHandler;
+#[async_trait::async_trait]
 impl MethodHandler for ReadHandler {
     fn name(&self) -> &'static str { "workspace.read" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         params: Value,
         _ctx: &RpcContext,
@@ -82,11 +60,8 @@ impl MethodHandler for ReadHandler {
             .ok_or_else(|| RouterError::Internal("missing 'workspace' param".into()))?;
         let path = params.get("path").and_then(|v| v.as_str())
             .ok_or_else(|| RouterError::Internal("missing 'path' param".into()))?;
-
-        // Workspace guard.
         let resolved = tools::resolve_within(workspace, path)
             .map_err(RouterError::Internal)?;
-
         let meta = std::fs::metadata(&resolved)
             .map_err(|e| RouterError::Internal(format!("stat failed: {e}")))?;
         if meta.len() > READ_MAX_BYTES {
@@ -94,19 +69,18 @@ impl MethodHandler for ReadHandler {
                 "file too large: {} bytes (max {})", meta.len(), READ_MAX_BYTES
             )));
         }
-
-        let content = tokio::runtime::Handle::current()
-            .block_on(commands::read_file(resolved.to_string_lossy().into_owned()))
+        let content = commands::read_file(resolved.to_string_lossy().into_owned()).await
             .map_err(RouterError::Internal)?;
         Ok(json!({ "path": path, "size": meta.len(), "content": content }))
     }
 }
 
 pub struct StatHandler;
+#[async_trait::async_trait]
 impl MethodHandler for StatHandler {
     fn name(&self) -> &'static str { "workspace.stat" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         params: Value,
         _ctx: &RpcContext,
@@ -116,18 +90,15 @@ impl MethodHandler for StatHandler {
             .ok_or_else(|| RouterError::Internal("missing 'workspace' param".into()))?;
         let path = params.get("path").and_then(|v| v.as_str())
             .ok_or_else(|| RouterError::Internal("missing 'path' param".into()))?;
-
         let resolved = tools::resolve_within(workspace, path)
             .map_err(RouterError::Internal)?;
         let meta = std::fs::metadata(&resolved)
             .map_err(|e| RouterError::Internal(format!("stat failed: {e}")))?;
-        let is_dir = meta.is_dir();
-        let is_file = meta.is_file();
         Ok(json!({
             "path": path,
             "size": meta.len(),
-            "is_dir": is_dir,
-            "is_file": is_file,
+            "is_dir": meta.is_dir(),
+            "is_file": meta.is_file(),
             "modified": meta.modified().ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
@@ -136,10 +107,11 @@ impl MethodHandler for StatHandler {
 }
 
 pub struct SearchHandler;
+#[async_trait::async_trait]
 impl MethodHandler for SearchHandler {
     fn name(&self) -> &'static str { "workspace.search" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         params: Value,
         _ctx: &RpcContext,
@@ -153,9 +125,7 @@ impl MethodHandler for SearchHandler {
             .and_then(|v| v.as_u64())
             .unwrap_or(SEARCH_MAX_RESULTS as u64) as usize;
         let max_results = max_results.min(SEARCH_MAX_RESULTS);
-
-        let results = tokio::runtime::Handle::current()
-            .block_on(commands::search_files(path.to_string(), pattern.to_string()))
+        let results = commands::search_files(path.to_string(), pattern.to_string()).await
             .map_err(RouterError::Internal)?;
         let truncated = results.len() > max_results;
         let capped: Vec<String> = results.into_iter().take(max_results).collect();
@@ -190,8 +160,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn list_caps_depth() {
+    #[tokio::test]
+    async fn list_caps_depth() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
         std::fs::write(dir.path().join("a/file.txt"), "x").unwrap();
@@ -204,19 +174,13 @@ mod tests {
         let r = ListHandler.handle(
             json!({ "workspace": dir.path().to_string_lossy(), "depth": 2 }),
             &ctx, &conn,
-        ).unwrap();
+        ).await.unwrap();
         let entries = r["entries"].as_array().unwrap();
-        // depth 0 (root), depth 1 (a/), depth 2 (a/b/, a/file.txt).
-        // a/b/c/deep.txt at depth 3 should be excluded.
         assert!(entries.iter().all(|e| e["depth"].as_u64().unwrap() <= 2));
     }
 
-    #[test]
-    fn read_refuses_oversize() {
-        // We can't easily build a 5MB+ file in a unit test cheaply, so
-        // we verify the cap constant is wired by writing a small file
-        // and reading it back. The negative case is covered by an
-        // integration test in WP12.
+    #[tokio::test]
+    async fn read_small_file() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("ok.txt");
         std::fs::write(&p, "hello").unwrap();
@@ -227,12 +191,12 @@ mod tests {
         let r = ReadHandler.handle(
             json!({ "workspace": dir.path().to_string_lossy(), "path": "ok.txt" }),
             &ctx, &conn,
-        ).unwrap();
+        ).await.unwrap();
         assert_eq!(r["content"], "hello");
     }
 
-    #[test]
-    fn stat_returns_metadata() {
+    #[tokio::test]
+    async fn stat_returns_metadata() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("f.txt");
         std::fs::write(&p, "abc").unwrap();
@@ -243,7 +207,7 @@ mod tests {
         let r = StatHandler.handle(
             json!({ "workspace": dir.path().to_string_lossy(), "path": "f.txt" }),
             &ctx, &conn,
-        ).unwrap();
+        ).await.unwrap();
         assert_eq!(r["size"], 3);
         assert_eq!(r["is_file"], true);
         assert_eq!(r["is_dir"], false);

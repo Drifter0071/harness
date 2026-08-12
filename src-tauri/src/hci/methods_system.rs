@@ -9,19 +9,21 @@ use serde_json::{json, Value};
 use crate::hci::router::{MethodHandler, MethodTier, RpcContext, ConnectionCtx, RouterError};
 
 pub struct PingHandler;
+#[async_trait::async_trait]
 impl MethodHandler for PingHandler {
     fn name(&self) -> &'static str { "system.ping" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+    async fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
         Ok(json!({ "pong": true, "uptime_ms": ctx.elapsed_ms() }))
     }
 }
 
 pub struct InfoHandler;
+#[async_trait::async_trait]
 impl MethodHandler for InfoHandler {
     fn name(&self) -> &'static str { "system.info" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+    async fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
         let channel = if cfg!(debug_assertions) { "debug" } else { "release" };
         let platform = if cfg!(target_os = "windows") {
             "windows"
@@ -74,21 +76,20 @@ mod tests {
         (auth, ctx)
     }
 
-    #[test]
-    fn ping_returns_pong_and_uptime() {
+    #[tokio::test]
+    async fn ping_returns_pong_and_uptime() {
         let (_a, c) = ctx();
         let conn = ConnectionCtx { session_token: "ignored".into() };
-        // (router doesn't see a session, so it would reject — bypass via direct call)
-        let r = PingHandler.handle(json!({}), &c, &conn).unwrap();
+        let r = PingHandler.handle(json!({}), &c, &conn).await.unwrap();
         assert_eq!(r["pong"], true);
         assert!(r["uptime_ms"].as_i64().is_some());
     }
 
-    #[test]
-    fn info_returns_expected_shape() {
+    #[tokio::test]
+    async fn info_returns_expected_shape() {
         let (_a, c) = ctx();
         let conn = ConnectionCtx { session_token: "ignored".into() };
-        let r = InfoHandler.handle(json!({}), &c, &conn).unwrap();
+        let r = InfoHandler.handle(json!({}), &c, &conn).await.unwrap();
         assert!(r["version"].is_string());
         assert!(r["platform"].is_string());
         assert!(r["webview"].is_string());

@@ -17,8 +17,6 @@ interface PopoverState {
   query: string;
   results: string[];
   selectedIndex: number;
-  top: number;
-  left: number;
 }
 
 export function MentionInput({
@@ -36,8 +34,6 @@ export function MentionInput({
     query: "",
     results: [],
     selectedIndex: 0,
-    top: 0,
-    left: 0,
   });
 
   // Update popover position + results whenever the textarea caret moves
@@ -58,15 +54,11 @@ export function MentionInput({
       return;
     }
     const results = rankMentionResults(parsed.query, fileTree);
-    // Position the popover just below the textarea's bottom edge.
-    const rect = ta.getBoundingClientRect();
     setPopover({
       open: true,
       query: parsed.query,
       results,
       selectedIndex: 0,
-      top: rect.bottom + 6,
-      left: rect.left,
     });
   };
 
@@ -177,10 +169,7 @@ export function MentionInput({
         style={{ minHeight: "44px", maxHeight: "200px" }}
       />
       {popover.open && (
-        <div
-          className="fixed z-50 bg-surface-2 border border-border-default rounded-lg min-w-[300px] max-w-[440px] shadow-lg animate-fade-in flex flex-col overflow-hidden"
-          style={{ top: popover.top, left: popover.left }}
-        >
+        <div className="absolute left-0 right-0 bottom-full z-50 glass-mist mention-popover animate-mention-in flex flex-col overflow-hidden">
           <div className="px-2 py-1 text-[10px] text-white-15 uppercase tracking-wider border-b border-border-subtle flex items-center justify-between">
             <span>
               {popover.query
@@ -194,7 +183,7 @@ export function MentionInput({
 
           <div
             ref={listRef}
-            className="max-h-[240px] overflow-y-auto overscroll-contain"
+            className="max-h-[min(320px,45vh)] overflow-y-auto overscroll-contain"
           >
             {popover.results.length === 0 ? (
               <div className="px-3 py-3 text-[11px] text-white-30">

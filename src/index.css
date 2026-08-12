@@ -273,4 +273,46 @@ button.glass-quartz:focus-visible {
 .glass-mist:hover { border-color: rgba(255, 255, 255, 0.11); }
 .glass-mist:focus-within { border-color: rgba(255, 255, 255, 0.18); }
 
+/* ── Mention popover — attached above the message box ──────────────
+   Rendered as an absolutely-positioned child of the message box
+   (which is `relative`), pinned to its top edge via `bottom-full`.
+   It shares the box's glass border/radius language but uses a solid
+   near-black fill (`--surface-1`) so content behind it — the model /
+   selector row directly above the box — can't bleed through:
+   the popover squares its bottom corners / drops its bottom border,
+   and while it is open the box's top border + top radius are removed
+   via :has() so there is no visible seam between them.          */
+.mention-popover {
+  border-radius: var(--m-radius) var(--m-radius) 0 0;
+  border-bottom: none;
+  /* Near-opaque surface so the model/selector row above the message
+     box can't bleed through the 2% glass fill and read as overlap. */
+  background: var(--surface-1);
+}
+
+.glass-mist:has(.mention-popover) {
+  border-top-color: transparent;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  /* The box is `isolation: isolate`, which traps the popover's z-index
+     inside it — lift the whole box above the messages/selector row
+     while the popover is open (below global chrome at z-50). */
+  z-index: 40;
+  /* Drop the inset top catch-light so the seam is a clean join. */
+  box-shadow:
+    inset 0 0 1px rgba(255, 255, 255, 0.03),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+@keyframes mentionIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-mention-in { animation: mentionIn 0.16s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-mention-in { animation: none; }
+}
+
 

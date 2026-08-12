@@ -45,17 +45,16 @@ impl CanvasEventBus {
 }
 
 pub struct SnapshotHandler;
+#[async_trait::async_trait]
 impl MethodHandler for SnapshotHandler {
     fn name(&self) -> &'static str { "canvas.snapshot" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         _params: Value,
         _ctx: &RpcContext,
         _conn: &ConnectionCtx,
     ) -> Result<Value, RouterError> {
-        // v0: surface the missing-bridge case explicitly so clients
-        // don't mistake an empty canvas for an empty app.
         Ok(json!({
             "snapshot_id": uuid::Uuid::new_v4().to_string(),
             "captured_at": chrono::Utc::now().to_rfc3339(),
@@ -67,19 +66,16 @@ impl MethodHandler for SnapshotHandler {
 }
 
 pub struct SubscribeHandler;
+#[async_trait::async_trait]
 impl MethodHandler for SubscribeHandler {
     fn name(&self) -> &'static str { "events.subscribe" }
     fn tier(&self) -> MethodTier { MethodTier::Read }
-    fn handle(
+    async fn handle(
         &self,
         _params: Value,
         ctx: &RpcContext,
         _conn: &ConnectionCtx,
     ) -> Result<Value, RouterError> {
-        // v0: the router doesn't push to connections from the broadcast
-        // bus yet. We acknowledge the subscription so the protocol is
-        // honest; the push path is part of the WebView bridge work
-        // (deferred).
         let _bus = ctx.canvas_bus.as_ref();
         Ok(json!({ "ok": true, "wired": false }))
     }

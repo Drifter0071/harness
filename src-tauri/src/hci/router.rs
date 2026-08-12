@@ -152,11 +152,13 @@ pub struct RpcError {
 
 /// Trait every method handler implements. The router dispatches by
 /// name and never invokes a handler without first checking tier and
-/// auth.
+/// auth. `handle` is async because most handlers call into
+/// `commands::*` (which is async) or read shared state.
+#[async_trait::async_trait]
 pub trait MethodHandler: Send + Sync {
     fn name(&self) -> &'static str;
     fn tier(&self) -> MethodTier;
-    fn handle(
+    async fn handle(
         &self,
         params: Value,
         ctx: &RpcContext,
@@ -204,7 +206,7 @@ impl Router {
     /// Handle a single parsed request frame. Returns the response to
     /// send back. Notifications (no `id`) return `None` — caller doesn't
     /// write anything to the wire.
-    pub fn handle_request(
+    pub async fn handle_request(
         &self,
         req: RpcRequest,
         ctx: &RpcContext,
@@ -212,17 +214,36 @@ impl Router {
     ) -> Option<RpcResponse> {
         let id = req.id.clone().unwrap_or(Value::Null);
 
+        // JSON-RPC notifications: no `id` field → no response on the
+        // wire. Per spec, even an error must not produce a response.
+        if req.is_notification() {
+            // Still run the handler (or auth gate) so the call has
+            // observable side effects, but swallow the result.
+            let _ = self.dispatch(&req, ctx, conn).await;
+            return None;
+        }
+
         // Auth gate: every method except `auth` requires a valid session.
-        // `auth` is special — it establishes the session — and is handled
-        // by the server before this function is called, so its absence
-        // here is a programming error and we reject.
         if let Some(auth) = &ctx.auth {
             if req.method != "auth" && !auth.is_valid_session(&conn.session_token) {
                 return Some(RpcResponse::err(id, ERR_AUTH_REQUIRED, "auth required"));
             }
         }
 
-        // Tier gate.
+        self.dispatch(&req, ctx, conn).await
+    }
+
+    /// Inner dispatch: auth, tier, and method lookup. Returns the
+    /// response envelope or `None` for notifications (which the
+    /// outer function has already filtered).
+    async fn dispatch(
+        &self,
+        req: &RpcRequest,
+        ctx: &RpcContext,
+        conn: &ConnectionCtx,
+    ) -> Option<RpcResponse> {
+        let id = req.id.clone().unwrap_or(Value::Null);
+
         if let Some(handler) = self.get(&req.method) {
             if handler.tier() == MethodTier::Write && !ctx.writes_enabled {
                 return Some(RpcResponse::err(
@@ -231,7 +252,7 @@ impl Router {
                     "write tier disabled",
                 ));
             }
-            return match handler.handle(req.params.clone(), ctx, conn) {
+            return match handler.handle(req.params.clone(), ctx, conn).await {
                 Ok(result) => Some(RpcResponse::ok(id, result)),
                 Err(e) => {
                     let (code, msg) = match &e {
@@ -264,19 +285,21 @@ mod tests {
     use std::sync::Arc;
 
     struct EchoHandler;
+    #[async_trait::async_trait]
     impl MethodHandler for EchoHandler {
         fn name(&self) -> &'static str { "echo" }
         fn tier(&self) -> MethodTier { MethodTier::Read }
-        fn handle(&self, params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+        async fn handle(&self, params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
             Ok(params)
         }
     }
 
     struct WriteHandler;
+    #[async_trait::async_trait]
     impl MethodHandler for WriteHandler {
         fn name(&self) -> &'static str { "do.write" }
         fn tier(&self) -> MethodTier { MethodTier::Write }
-        fn handle(&self, _params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+        async fn handle(&self, _params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
             Ok(Value::String("wrote".into()))
         }
     }
@@ -295,29 +318,30 @@ mod tests {
         (auth, ctx)
     }
 
-    #[test]
-    fn read_method_dispatches() {
+    #[tokio::test]
+    async fn read_method_dispatches() {
         let (_auth, ctx) = make_ctx(false);
-        let _conn = ConnectionCtx { session_token: "any".into() };
-        // Pre-populate a known session so the auth gate passes.
-        let session = ctx.auth.as_ref().unwrap().rotate();
-        let conn = ConnectionCtx { session_token: session.clone() };
-        // (rotate clears sessions, so we need to auth again)
-        let _ = ctx.auth.as_ref().unwrap().consume_boot_token(&session);
+        // `make_ctx` already consumed the boot token and minted a
+        // session. We can't recover that session from outside (the
+        // session token isn't returned by make_ctx), so for this test
+        // we just call rotate() to get a fresh boot token, then
+        // consume it for a fresh session.
+        let new_boot = ctx.auth.as_ref().unwrap().rotate();
+        let session = ctx.auth.as_ref().unwrap().consume_boot_token(&new_boot).unwrap();
+        let conn = ConnectionCtx { session_token: session };
 
         let router = Router::new().register(EchoHandler);
         let req: RpcRequest = serde_json::from_str(
             r#"{"id":1,"method":"echo","params":{"x":42}}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).unwrap();
+        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["x"], 42);
     }
 
-    #[test]
-    fn write_method_blocked_when_disabled() {
+    #[tokio::test]
+    async fn write_method_blocked_when_disabled() {
         let (_auth, _ctx) = make_ctx(false);
-        // Use a fresh auth state so the session check is straightforward.
         let auth = AuthState::new("boot2".into());
         let session = auth.consume_boot_token("boot2").unwrap();
         let ctx = RpcContext {
@@ -333,12 +357,12 @@ mod tests {
         let req: RpcRequest = serde_json::from_str(
             r#"{"id":"a","method":"do.write","params":{}}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).unwrap();
+        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.error.unwrap().code, ERR_WRITE_DISABLED);
     }
 
-    #[test]
-    fn write_method_succeeds_when_enabled() {
+    #[tokio::test]
+    async fn write_method_succeeds_when_enabled() {
         let auth = AuthState::new("boot3".into());
         let session = auth.consume_boot_token("boot3").unwrap();
         let ctx = RpcContext {
@@ -354,12 +378,12 @@ mod tests {
         let req: RpcRequest = serde_json::from_str(
             r#"{"id":"a","method":"do.write","params":{}}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).unwrap();
+        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.result.unwrap(), Value::String("wrote".into()));
     }
 
-    #[test]
-    fn unknown_method_returns_32601() {
+    #[tokio::test]
+    async fn unknown_method_returns_32601() {
         let auth = AuthState::new("boot4".into());
         let session = auth.consume_boot_token("boot4").unwrap();
         let ctx = RpcContext {
@@ -374,12 +398,12 @@ mod tests {
         let req: RpcRequest = serde_json::from_str(
             r#"{"id":1,"method":"nope"}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).unwrap();
+        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.error.unwrap().code, -32601);
     }
 
-    #[test]
-    fn invalid_session_returns_auth_required() {
+    #[tokio::test]
+    async fn invalid_session_returns_auth_required() {
         let auth = AuthState::new("boot5".into());
         let _ = auth.consume_boot_token("boot5").unwrap();
         let ctx = RpcContext {
@@ -394,12 +418,12 @@ mod tests {
         let req: RpcRequest = serde_json::from_str(
             r#"{"id":1,"method":"echo","params":{}}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).unwrap();
+        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.error.unwrap().code, ERR_AUTH_REQUIRED);
     }
 
-    #[test]
-    fn notification_returns_none() {
+    #[tokio::test]
+    async fn notification_returns_none() {
         let auth = AuthState::new("boot6".into());
         let session = auth.consume_boot_token("boot6").unwrap();
         let ctx = RpcContext {
@@ -411,11 +435,10 @@ mod tests {
         };
         let conn = ConnectionCtx { session_token: session };
         let router = Router::new().register(EchoHandler);
-        // No `id` field = notification.
         let req: RpcRequest = serde_json::from_str(
             r#"{"method":"echo","params":{}}"#,
         ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn);
+        let resp = router.handle_request(req, &ctx, &conn).await;
         assert!(resp.is_none());
     }
 }
