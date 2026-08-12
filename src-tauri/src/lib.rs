@@ -61,6 +61,7 @@ pub fn run() {
             // Sessions + recents + project opening (Phase 1.5 spec)
             commands::pick_project_folder,
             commands::list_sessions,
+            commands::load_active_session,
             commands::create_session,
             commands::load_session,
             commands::save_session,

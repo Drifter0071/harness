@@ -52,12 +52,40 @@ export interface SessionMessage {
   agentName?: string;
 }
 
+export type ActionMode = "auto" | "askRisky" | "askAll";
+
+export type ToolActivityStatus = "ran" | "denied" | "error";
+
+/** One persisted tool-execution record (spec §4.1 `activities`). */
+export interface ToolActivity {
+  id: string;
+  tool: string;
+  summary: string;
+  status: ToolActivityStatus;
+  /** ISO 8601 UTC string. */
+  timestamp: string;
+}
+
+/** Snapshot of the agent personality that drives a session. */
+export interface AgentSnapshot {
+  id: string;
+  name: string;
+  role: AgentRole;
+  systemPrompt: string;
+}
+
 export interface Session {
   version: number;
+  id: string;
+  title: string;
   projectPath: string;
   createdAt: string;
   updatedAt: string;
+  agent: AgentSnapshot;
+  goalMode: boolean;
+  actionMode: ActionMode;
   messages: SessionMessage[];
+  activities: ToolActivity[];
   /** Null until the first assistant response arrives (spec §4.5b). */
   tokenStats?: {
     lastIn: number;
@@ -208,6 +236,97 @@ export interface ChatError {
   retryAfterSeconds?: number;
 }
 
+// ── Agent roster + turn loop (agent-sessions spec) ──
+
+export interface AgentPersonality {
+  id: string;
+  name: string;
+  role: AgentRole;
+  systemPrompt: string;
+  /** Builtin personas are editable but cannot be deleted. */
+  builtin: boolean;
+}
+
+export interface AgentRoster {
+  version: number;
+  maxAgentsPerSession: number;
+  defaultAgentId: string;
+  agents: AgentPersonality[];
+}
+
+export interface AgentTurnRequest {
+  requestId: string;
+  sessionId: string;
+  modelId: string;
+  message: string;
+  actionMode: ActionMode;
+  goalMode: boolean;
+  workspace: string;
+}
+
+// Agent loop events (Rust → TS), routed by `requestId`.
+
+export interface AgentTurnStart {
+  requestId: string;
+}
+
+export interface AgentChunk {
+  requestId: string;
+  delta: string;
+}
+
+export interface AgentToolStart {
+  requestId: string;
+  callId: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface AgentToolResult {
+  requestId: string;
+  callId: string;
+  name: string;
+  ok: boolean;
+  summary: string;
+  status: ToolActivityStatus;
+}
+
+export interface AgentApprovalRequest {
+  requestId: string;
+  approvalId: string;
+  name: string;
+  summary: string;
+}
+
+export interface AgentApprovalResult {
+  requestId: string;
+  approvalId: string;
+  allowed: boolean;
+}
+
+export interface AgentDone {
+  requestId: string;
+  content: string;
+  usage: ChatUsage;
+}
+
+export type AgentErrorKind =
+  | "cancelled"
+  | "auth"
+  | "rate_limited"
+  | "network"
+  | "provider"
+  | "bad_request"
+  | "internal"
+  | "loop_cap"
+  | "stalled";
+
+export interface AgentError {
+  requestId: string;
+  kind: AgentErrorKind;
+  message: string;
+}
+
 // ── IPC Bridge ──
 
 export const ipc = {
@@ -270,11 +389,23 @@ export const ipc = {
   cancelChat: (requestId: string) =>
     invoke<void>("cancel_chat", { requestId }),
 
-  // Sessions + recents + file listing (Phase 1.5 spec)
-  loadSession: (projectPath: string) =>
-    invoke<Session | null>("load_session", { projectPath }),
+  // Sessions + recents + file listing (agent-sessions spec)
+  listSessions: (projectPath: string) =>
+    invoke<SessionSummary[]>("list_sessions", { projectPath }),
+  loadActiveSession: (projectPath: string) =>
+    invoke<Session | null>("load_active_session", { projectPath }),
+  createSession: (projectPath: string, agent?: AgentSnapshot) =>
+    invoke<Session>("create_session", { projectPath, agent }),
+  loadSession: (projectPath: string, sessionId: string) =>
+    invoke<Session | null>("load_session", { projectPath, sessionId }),
   saveSession: (projectPath: string, session: Session) =>
     invoke<Session>("save_session", { projectPath, session }),
+  renameSession: (projectPath: string, sessionId: string, title: string) =>
+    invoke<SessionSummary>("rename_session", { projectPath, sessionId, title }),
+  deleteSession: (projectPath: string, sessionId: string) =>
+    invoke<void>("delete_session", { projectPath, sessionId }),
+  setActiveSession: (projectPath: string, sessionId: string) =>
+    invoke<void>("set_active_session", { projectPath, sessionId }),
   listRecentProjects: () => invoke<RecentProject[]>("list_recent_projects"),
   forgetRecentProject: (path: string) =>
     invoke<void>("forget_recent_project", { path }),
@@ -283,16 +414,27 @@ export const ipc = {
   listFilesRecursive: (projectPath: string) =>
     invoke<string[]>("list_files_recursive", { projectPath }),
 
-  // Sessions (lightweight index for the Sessions panel)
-  // ─────────────────────────────────────────────────────────
-  // NOTE: Backend wiring is owned by the LLM-support work in flight.
-  // These calls return empty / null until the Rust side lands. The UI
-  // consumes the contract now so nothing has to be re-shaped later.
-  listSessions: () => invoke<SessionSummary[]>("list_sessions"),
-  loadSessionById: (id: string) =>
-    invoke<Session | null>("load_session_by_id", { id }),
-  forgetSession: (id: string) =>
-    invoke<void>("forget_session", { id }),
+  // Agent roster (Agent Manager window)
+  loadAgentRoster: (projectPath: string) =>
+    invoke<AgentRoster>("load_agent_roster", { projectPath }),
+  saveAgentRoster: (projectPath: string, roster: AgentRoster) =>
+    invoke<AgentRoster>("save_agent_roster", { projectPath, roster }),
+
+  // Agent turn loop
+  runAgentTurn: (req: AgentTurnRequest) =>
+    invoke<void>("run_agent_turn", {
+      requestId: req.requestId,
+      sessionId: req.sessionId,
+      modelId: req.modelId,
+      message: req.message,
+      actionMode: req.actionMode,
+      goalMode: req.goalMode,
+      workspace: req.workspace,
+    }),
+  respondApproval: (requestId: string, allow: boolean) =>
+    invoke<void>("respond_approval", { requestId, allow }),
+  cancelAgent: (requestId: string) =>
+    invoke<void>("cancel_agent", { requestId }),
 };
 
 // ── Chat streaming events (Rust → TS) ──
@@ -306,4 +448,27 @@ export const chatEvents = {
     listen<ChatDone>("chat-done", (e) => fn(e.payload)),
   onError: (fn: (e: ChatError) => void) =>
     listen<ChatError>("chat-error", (e) => fn(e.payload)),
+};
+
+// ── Agent loop events (Rust → TS) ──
+// The Rust side emits exactly one terminal event per requestId
+// (`agent-done` or `agent-error`), with all other events before it.
+
+export const agentEvents = {
+  onTurnStart: (fn: (e: AgentTurnStart) => void) =>
+    listen<AgentTurnStart>("agent-turn-start", (e) => fn(e.payload)),
+  onChunk: (fn: (e: AgentChunk) => void) =>
+    listen<AgentChunk>("agent-chunk", (e) => fn(e.payload)),
+  onToolStart: (fn: (e: AgentToolStart) => void) =>
+    listen<AgentToolStart>("agent-tool-start", (e) => fn(e.payload)),
+  onToolResult: (fn: (e: AgentToolResult) => void) =>
+    listen<AgentToolResult>("agent-tool-result", (e) => fn(e.payload)),
+  onApprovalRequest: (fn: (e: AgentApprovalRequest) => void) =>
+    listen<AgentApprovalRequest>("agent-approval-request", (e) => fn(e.payload)),
+  onApprovalResult: (fn: (e: AgentApprovalResult) => void) =>
+    listen<AgentApprovalResult>("agent-approval-result", (e) => fn(e.payload)),
+  onDone: (fn: (e: AgentDone) => void) =>
+    listen<AgentDone>("agent-done", (e) => fn(e.payload)),
+  onError: (fn: (e: AgentError) => void) =>
+    listen<AgentError>("agent-error", (e) => fn(e.payload)),
 };

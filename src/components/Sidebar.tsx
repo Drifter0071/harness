@@ -244,22 +244,28 @@ function SessionsPanel() {
     setSessions,
     activeSessionId,
     setActiveSessionId,
+    workspacePath,
   } = useStore();
 
   useEffect(() => {
-    ipc.listSessions()
+    if (!workspacePath) {
+      setSessions([]);
+      return;
+    }
+    ipc.listSessions(workspacePath)
       .then(setSessions)
       .catch(() => setSessions([]));
-  }, [setSessions]);
+  }, [workspacePath, setSessions]);
 
   const handleForget = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    if (!workspacePath) return;
     try {
-      await ipc.forgetSession(id);
+      await ipc.deleteSession(workspacePath, id);
       setSessions(sessions.filter((s) => s.id !== id));
       if (activeSessionId === id) setActiveSessionId(null);
     } catch (err) {
-      console.error("Failed to forget session:", err);
+      console.error("Failed to delete session:", err);
     }
   };
 

@@ -347,6 +347,14 @@ pub async fn list_sessions(
     crate::session::list_sessions(&project_path).await
 }
 
+/// Load the project's active session (or the newest when no marker is set).
+#[tauri::command]
+pub async fn load_active_session(
+    project_path: String,
+) -> Result<Option<crate::session::Session>, String> {
+    crate::session::load_active_session(&project_path).await
+}
+
 #[tauri::command]
 pub async fn create_session(
     project_path: String,

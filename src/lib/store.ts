@@ -21,10 +21,16 @@ export interface SessionMessage {
 
 export interface Session {
   version: number;
+  id: string;
+  title: string;
   projectPath: string;
   createdAt: string;
   updatedAt: string;
+  agent: import("./ipc").AgentSnapshot;
+  goalMode: boolean;
+  actionMode: import("./ipc").ActionMode;
   messages: SessionMessage[];
+  activities: import("./ipc").ToolActivity[];
   /** Null until the first assistant response arrives (spec §4.5b). */
   tokenStats?: TokenStats | null;
 }
@@ -90,9 +96,41 @@ interface HarnessState {
   appendToMessage: (id: string, delta: string) => void;
   removeMessage: (id: string) => void;
 
+  // Persisted tool activities of the active session (live feed source)
+  activities: import("./ipc").ToolActivity[];
+  setActivities: (list: import("./ipc").ToolActivity[]) => void;
+  appendActivity: (activity: import("./ipc").ToolActivity) => void;
+
   // Session metadata (independent of messages — useful for "created at")
   sessionMeta: { createdAt: string; updatedAt: string } | null;
   setSessionMeta: (m: { createdAt: string; updatedAt: string } | null) => void;
+
+  // Agent session options (composer options row; persisted with the session)
+  actionMode: import("./ipc").ActionMode;
+  setActionMode: (mode: import("./ipc").ActionMode) => void;
+  goalMode: boolean;
+  setGoalMode: (on: boolean) => void;
+  /** requestId of the in-flight agent turn, or null when idle. */
+  agentRequestId: string | null;
+  setAgentRequestId: (id: string | null) => void;
+  /** Pending tool approval shown in the composer, or null. */
+  pendingApproval: {
+    requestId: string;
+    approvalId: string;
+    name: string;
+    summary: string;
+  } | null;
+  setPendingApproval: (
+    p: {
+      requestId: string;
+      approvalId: string;
+      name: string;
+      summary: string;
+    } | null
+  ) => void;
+  /** Roster for the Agent Manager window; loaded per project. */
+  agentRoster: import("./ipc").AgentRoster | null;
+  setAgentRoster: (roster: import("./ipc").AgentRoster | null) => void;
 
   // Saved models + active model + telemetry (Phase 2.0)
   savedModels: import("./ipc").SavedModel[];
@@ -197,8 +235,22 @@ export const useStore = create<HarnessState>((set) => ({
     })),
   removeMessage: (id) =>
     set((state) => ({ messages: state.messages.filter((m) => m.id !== id) })),
+  activities: [],
+  setActivities: (list) => set({ activities: list }),
+  appendActivity: (activity) =>
+    set((state) => ({ activities: [...state.activities, activity] })),
   sessionMeta: null,
   setSessionMeta: (m) => set({ sessionMeta: m }),
+  actionMode: "askRisky",
+  setActionMode: (mode) => set({ actionMode: mode }),
+  goalMode: false,
+  setGoalMode: (on) => set({ goalMode: on }),
+  agentRequestId: null,
+  setAgentRequestId: (id) => set({ agentRequestId: id }),
+  pendingApproval: null,
+  setPendingApproval: (p) => set({ pendingApproval: p }),
+  agentRoster: null,
+  setAgentRoster: (roster) => set({ agentRoster: roster }),
 
   // Saved models + active model + telemetry (Phase 2.0)
   savedModels: [],
