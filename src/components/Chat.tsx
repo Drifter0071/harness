@@ -72,6 +72,8 @@ export function Chat() {
     reg(
       chatEvents.onChunk((e) => {
         const st = useStore.getState();
+        // eslint-disable-next-line no-console
+        console.log("[chat] chunk", e.requestId, "len", e.delta.length, "streaming", st.streamingRequestId);
         if (st.streamingRequestId && e.requestId === st.streamingRequestId) {
           st.appendToMessage(e.requestId, e.delta);
         }
@@ -81,6 +83,8 @@ export function Chat() {
     reg(
       chatEvents.onDone((e) => {
         const st = useStore.getState();
+        // eslint-disable-next-line no-console
+        console.log("[chat] done", e.requestId, "content_len", e.content.length);
         if (!st.streamingRequestId || e.requestId !== st.streamingRequestId) return;
         st.updateMessage(e.requestId, { content: e.content });
 
@@ -180,6 +184,8 @@ export function Chat() {
     st.appendMessage(userMsg);
 
     const requestId = nanoid();
+    // eslint-disable-next-line no-console
+    console.log("[chat] send", requestId, "model", model.id);
     st.appendMessage({
       id: requestId,
       role: "assistant",

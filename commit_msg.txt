@@ -1,8 +1,7 @@
-debug(chat): eprintln diagnostics in run_openai path
+debug(chat): console.log on chunk/done/send in Chat.tsx
 
-Adds stderr prints at: start of run_openai (url/model/key_len/msg_count),
-HTTP error path (status + body excerpt), stream first-byte arrival,
-stream errors, and emit_error call. No behavior change — pure logging.
-
-Use to debug Xiaomi MiMo v2.5 via Kilo AI gateway not returning
-any tokens (Agent working activates, model doesn't respond).
+Adds three console.log calls to the chat streaming event handlers
+in Chat.tsx. No behavior change. Used to diagnose "model responds
+but UI only updates after reload" — the logs will reveal whether
+chat-chunk events are arriving, whether streamingRequestId matches,
+and whether the listener was registered in time.
