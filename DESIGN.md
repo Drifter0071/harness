@@ -267,6 +267,36 @@ The popover uses `top-full left-1/2 -translate-x-1/2 mt-2`.
 The SidebarToggleFloating is a 34×34 `glass-quartz glass-quartz--pill` button
 at `left-3 top-[18px]`, only visible when the sidebar is closed.
 
+### Agent controls (`Chat.tsx`, `AgentManager.tsx`)
+
+Agent turns replace plain chat streaming whenever a project + session is
+open (`workspacePath && activeSessionId`). The controls live in the composer
+block, stacked above the input:
+
+- **Composer options row** (only when a session is open, below the model
+  selector row): a segmented action-mode control (`Auto` / `Ask risky` /
+  `Ask all`; `bg-surface-2` shell, active segment `bg-surface-4 text-white`,
+  inactive `text-white-30 hover:text-white`, `text-[11px]`) plus a right-side
+  **Goal** toggle — the same `w-7 h-4` switch recipe as the Thinking toggle,
+  with a `Target` icon (12px) that turns `text-status-active` when on.
+- **Pending approval card** — transient, shown above the input while the
+  Rust loop waits on a tool call: `bg-surface-2 border-border-subtle rounded`,
+  `ShieldCheck` (15px, `text-status-warning`), tool name in
+  `text-[12px] text-white font-medium`, one-line args summary
+  (`text-[11px] text-white-30 truncate`), and Allow / Deny buttons
+  (Allow: `bg-status-active text-black`; Deny: `bg-surface-4`, hover
+  `text-status-error`). Card clears itself on either response.
+- **Live activity strip** — while a turn runs, the last 4 persisted
+  `activities` render as compact rows (`text-[10px] text-white-30`):
+  `Wrench` icon (10px, `text-white-15`), tool name tinted by status
+  (`ran` → `text-status-active`, `denied` → `text-status-warning`,
+  `error` → `text-status-error`), summary truncated to 220px.
+- **Agent Manager** (`AgentManager.tsx`) — modal opened from the Sessions
+  panel's Bot button: `max-agents-per-session` number input, per-agent
+  cards (name, role select, system-prompt textarea), Add agent, Save →
+  `saveAgentRoster` (backend normalizes; the builtin `harness` agent is
+  editable but not deletable).
+
 ### Sidebar — two-panel floating column (`Sidebar.tsx`)
 
 The sidebar is a single `position: fixed` flex column on the left edge,
@@ -381,9 +411,14 @@ column.
     agentId?: string;
   }
   ```
-  Backend wiring (`listSessions`, `loadSessionById`, `forgetSession`) is
-  owned by the LLM-support work in flight. The UI consumes the contract
-  now so nothing has to be re-shaped later.
+  Sessions persist per project in `.harness/sessions/<id>.json` (version 2,
+  camelCase wire format; atomic tmp+rename writes; corrupt files archived).
+  Backend commands: `listSessions(projectPath)`, `createSession(projectPath)`,
+  `loadSession(projectPath, id)`, `loadActiveSession(projectPath)` (marker →
+  newest fallback), `saveSession`, `renameSession(projectPath, id, title)`,
+  `deleteSession(projectPath, id)`, `setActiveSession(projectPath, id)`.
+  Agent turns run through `runAgentTurn` / `respondApproval` / `cancelAgent`
+  and stream `agent-*` events routed by `requestId`.
 
 **Open / close flow:**
 - When `sidebarOpen` is `false`: a single `SidebarToggleFloating` button

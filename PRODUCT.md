@@ -72,25 +72,30 @@ agent task and only watch the canvas; another might keep both open.
 **Real and working:**
 - Tauri v2 shell, full React UI, all five surfaces wired up
 - Workspace engine v1: native folder picker, read/write/list/search/create, CLI exec
-- Multi-agent loop v1: typed agent graph (`Orchestrator`, `Coder`, `Architect`,
-  `Researcher`, `HealthMonitor`), spawn / message / status / stop, health checks
+- **Real agent sessions**: per-project session store (`.harness/sessions/`),
+  multi-session CRUD in the UI, and a Rust-owned agent turn loop — provider-native
+  tool calling (OpenAI chat completions), workspace tools (read/write/edit,
+  run commands, web search), an action-policy approval gate (Auto / Ask risky /
+  Ask all) with an in-composer Allow/Deny card, and a goal-mode loop with
+  user-driven `[continue]` and a turn cap.
+- Agent roster: Agent Manager modal edits named agent personalities
+  (builtin `harness` agent + user agents) persisted in `.harness/agents.json`.
 - BYOK settings: multiple model entries, OS keyring-backed secrets
 - Web search via DuckDuckGo
 - Build pipeline produces a working `.exe` (`npm run tauri:build`)
 
 **Stubbed / partial — call this out in copy and design:**
-- The agent loop has the **shape** of orchestration but the dispatching logic
-  between Orchestrator and sub-agents is still thin. Most "agent" interactions
-  today are still single-LLM calls routed through the typed agent struct.
+- Multi-agent **orchestration** is still thin: one capable harness agent
+  drives a session end-to-end; dispatching between named agents
+  (Orchestrator → Coder/Architect/…) is the next sprint.
+- Anthropic provider tool calling is deferred — `anthropic-messages` returns
+  a clear "not implemented" error for tool use; plain chat still works.
 - The canvas has the surfaces but auto-tiling and live updates from the agent
   graph are still being wired.
-- No persistence across launches of the workspace state (only model config
-  persists via `localStorage`).
 - No JS test/lint suite; Rust has clippy + fmt.
 
 **Not built yet (and that's fine for pre-launch):**
 - Real diff preview engine on the canvas
-- Plan-mode / approval flow for destructive writes
 - Multi-workspace tab model
 - Telemetry / crash reporting (intentionally off — privacy stance)
 

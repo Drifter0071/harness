@@ -1,6 +1,6 @@
 # Real Agent Sessions + Tool-Calling Agent Loop
 
-**Status:** Draft for review
+**Status:** Implemented (WP0–WP9 on `feat/agent-sessions`)
 **Date:** 2026-08-12
 **Scope:** Phase 2.5 — multi-session model, agent manager foundation, and a real tool-calling agent loop for Harness
 
