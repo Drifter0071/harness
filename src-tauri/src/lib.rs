@@ -2,6 +2,8 @@ mod agent;
 mod agent_loop;
 mod agents;
 mod commands;
+mod health_agent;
+mod hci;
 mod llm_client;
 mod models;
 mod secrets;
@@ -22,8 +24,28 @@ pub fn run() {
             // Initialize state. The secret store uses the OS keyring
             // in production; tests swap in `InMemoryStore` via a
             // different `run()` entry point.
-            let state = commands::AppState::new(Arc::new(secrets::KeyringStore::new()));
-            app.manage(state);
+            let state = Arc::new(commands::AppState::new(Arc::new(secrets::KeyringStore::new())));
+            app.manage(state.clone());
+
+            // HCI: start the control-interface server in a background
+            // task. Disabled by default in release, on by default in
+            // dev. No-ops if `HARNESS_CONTROL=0` is set.
+            let state_for_hci = state.clone();
+            tauri::async_runtime::spawn(async move {
+                match hci::integration::start(state_for_hci).await {
+                    Ok(Some(_server)) => {
+                        // Kept alive for the life of the app. The Drop
+                        // handler deletes the conn-info file on shutdown.
+                        // (Tokio JoinHandle would let us await, but the
+                        // process exits anyway on Tauri shutdown.)
+                    }
+                    Ok(None) => {} // HCI disabled, normal.
+                    Err(e) => {
+                        eprintln!("[hci] failed to start: {e}");
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
