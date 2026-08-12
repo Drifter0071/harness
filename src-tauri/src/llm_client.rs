@@ -701,14 +701,33 @@ async fn run_openai(
                             break;
                         }
                         if let Some(choice) = parsed.pointer("/choices/0") {
+                            // Some OpenAI-compatible providers (notably
+                            // reasoning models proxied through gateways
+                            // like Kilo AI) return the model's text in
+                            // `delta.reasoning_content` and either leave
+                            // `delta.content` empty or never emit it.
+                            // Read both so the user actually sees the
+                            // response. We surface the reasoning content
+                            // as the chat chunk; the final answer (when
+                            // present) will also be in `delta.content`.
+                            let mut emitted = String::new();
+                            if let Some(text) = choice.pointer("/delta/reasoning_content").and_then(|c| c.as_str()) {
+                                if !text.is_empty() {
+                                    full_content.push_str(text);
+                                    emitted.push_str(text);
+                                }
+                            }
                             if let Some(text) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
                                 if !text.is_empty() {
                                     full_content.push_str(text);
-                                    let _ = app.emit("chat-chunk", ChatChunk {
-                                        request_id: request.request_id.clone(),
-                                        delta: text.to_string(),
-                                    });
+                                    emitted.push_str(text);
                                 }
+                            }
+                            if !emitted.is_empty() {
+                                let _ = app.emit("chat-chunk", ChatChunk {
+                                    request_id: request.request_id.clone(),
+                                    delta: emitted,
+                                });
                             }
                         }
                         if let Some(usage) = parsed.get("usage") {
