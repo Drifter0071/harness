@@ -5,6 +5,7 @@ mod llm_client;
 mod models;
 mod secrets;
 mod session;
+mod tools;
 mod web_search;
 
 use std::sync::Arc;
