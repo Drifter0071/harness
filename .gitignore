@@ -23,6 +23,8 @@
 .impeccable/live/handled.json
 .impeccable/live/bridge-stdout.log
 .impeccable/live/poll-bridge.log
+.impeccable/live/config.json
+.impeccable/live/poll-bridge.mjs
 .impeccable-live.json
 .impeccable-live/
 app/.impeccable-live/
@@ -40,6 +42,7 @@ node_modules
 # App state + build output
 .harness/
 dist/
+src-tauri/target/
 
 # Scratch / debug artifacts
 lmmc.rs.bak
