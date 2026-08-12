@@ -1,0 +1,2 @@
+// Temporary test module to verify module visibility.
+pub fn hello() -> &'static str { "hello" }
