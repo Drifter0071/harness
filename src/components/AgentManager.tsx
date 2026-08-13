@@ -3,7 +3,7 @@
 // enforces that on save. Saved via `save_agent_roster`; the store is
 // refreshed with the normalized roster the backend returns.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { useStore } from "../lib/store";
 import { ipc } from "../lib/ipc";
 import type { AgentPersonality, AgentRoster } from "../lib/ipc";
@@ -30,6 +30,9 @@ export function AgentManager() {
   }, [open, roster]);
 
   if (!open) return null;
+
+  const maxAgents = draft?.maxAgentsPerSession ?? 1;
+  const sliderFill = Math.max(0, Math.min(100, ((maxAgents - 1) / (12 - 1)) * 100));
 
   const updateAgent = (index: number, patch: Partial<AgentPersonality>) => {
     setDraft((d) => {
@@ -95,21 +98,26 @@ export function AgentManager() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <label className="text-[11px] text-white-30 whitespace-nowrap">
               Max agents per session
             </label>
             <input
-              type="number"
+              type="range"
               min={1}
-              max={8}
-              value={draft?.maxAgentsPerSession ?? 1}
+              max={12}
+              value={maxAgents}
               onChange={(e) => {
-                const v = Math.max(1, Math.min(8, Number(e.target.value) || 1));
+                const v = Math.max(1, Math.min(12, Number(e.target.value) || 1));
                 setDraft((d) => (d ? { ...d, maxAgentsPerSession: v } : d));
               }}
-              className="bg-surface-2 border border-border-subtle rounded px-2 py-1 text-[12px] text-white w-16 outline-none focus:border-border-strong"
+              className="slider-quartz flex-1 min-w-0"
+              style={{ "--slider-fill": `${sliderFill}%` } as CSSProperties}
+              aria-label="Max agents per session"
             />
+            <span className="text-[12px] text-white font-mono w-6 text-right">
+              {maxAgents}
+            </span>
           </div>
 
           {draft?.agents.map((agent, i) => (
@@ -175,7 +183,7 @@ export function AgentManager() {
           <button
             onClick={handleSave}
             disabled={saving}
-            className="px-4 py-1.5 text-[12px] text-white bg-surface-4 hover:bg-border-strong rounded transition-colors disabled:opacity-50"
+            className="glass-quartz glass-quartz--pill px-4 py-1.5 text-[12px] text-white"
           >
             {saving ? "Saving..." : "Save roster"}
           </button>

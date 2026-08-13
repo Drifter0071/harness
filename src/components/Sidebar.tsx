@@ -2,11 +2,11 @@ import { useEffect, useState, useCallback } from "react";
 import { useStore } from "../lib/store";
 import { ipc } from "../lib/ipc";
 import type { DirEntry, SessionSummary } from "../lib/ipc";
+import { FileTypeIcon } from "../lib/file-icons";
 import {
   Folder,
   FileText,
   PanelLeftClose,
-  PanelLeftOpen,
   History,
   X,
   Plus,
@@ -210,18 +210,11 @@ function ContentPanel({ onClose }: { onClose: () => void }) {
                 <ActiveDot visible={isActive} />
                 {entry.is_dir ? (
                   <Folder
-                    size={10}
-                    className={`flex-shrink-0 ml-1.5 ${
-                      isActive
-                        ? "text-accent-green"
-                        : "text-white-30 group-hover:text-white-50"
-                    }`}
+                    size={12}
+                    className={`flex-shrink-0 ml-1.5 ${isActive ? "text-accent-green" : "text-white-30 group-hover:text-white-50"}`}
                   />
                 ) : (
-                  <FileText
-                    size={10}
-                    className="text-white-15 flex-shrink-0 ml-1.5"
-                  />
+                  <FileTypeIcon path={entry.path} size={14} className="flex-shrink-0 ml-1.5" />
                 )}
                 <span className="text-[11px] truncate">{entry.name}</span>
               </div>
@@ -264,6 +257,13 @@ function SessionsPanel() {
     if (!workspacePath) return;
     try {
       const created = await ipc.createSession(workspacePath);
+      // Insert into the sidebar list and switch to the new session
+      // immediately. The activeSessionId watcher in session-manager
+      // will then load + apply the empty session, but we also call
+      // the store updates directly so the UI clears messages, token
+      // stats and activities without waiting for the async watcher
+      // round-trip (which previously left the new session looking
+      // like a clone of the previous one until a full reload).
       setSessions([...(sessions ?? []), {
         id: created.id,
         projectPath: created.projectPath,
@@ -275,6 +275,20 @@ function SessionsPanel() {
         agentId: created.agent.id,
       }]);
       setActiveSessionId(created.id);
+      // Apply the freshly-created session to the in-memory store so
+      // the chat list, token stats, and activities all clear right
+      // away. The async watcher will run too, but it's idempotent
+      // (`loadedSessionId` becomes `created.id`).
+      useStore.setState({
+        messages: created.messages ?? [],
+        activities: created.activities ?? [],
+        tokenStats: created.tokenStats ?? null,
+        sessionMeta: { createdAt: created.createdAt, updatedAt: created.updatedAt },
+        goalMode: created.goalMode ?? false,
+        actionMode: created.actionMode ?? "askRisky",
+        streamingRequestId: null,
+        jobActivities: [],
+      });
     } catch (err) {
       console.error("Failed to create session:", err);
     }
@@ -303,18 +317,20 @@ function SessionsPanel() {
           {workspacePath && (
             <button
               onClick={handleNewSession}
-              className="p-1 text-white-30 hover:text-white transition-colors"
+              className="glass-quartz glass-quartz--pill flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
               title="New session"
+              aria-label="New session"
             >
-              <Plus size={11} />
+              <Plus size={16} />
             </button>
           )}
           <button
             onClick={() => setAgentManagerOpen(true)}
-            className="p-1 text-white-30 hover:text-white transition-colors"
+            className="glass-quartz glass-quartz--pill flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
             title="Agent Manager"
+            aria-label="Agent Manager"
           >
-            <Bot size={11} />
+            <Bot size={16} />
           </button>
         </div>
       }
@@ -324,7 +340,9 @@ function SessionsPanel() {
       <div className="flex-1 overflow-y-auto min-h-0 pb-1">
         {sessions.length === 0 ? (
           <div className="px-3 py-4 text-center">
-            <span className="text-[11px] text-white-15">
+            <span className="inline-flex items-center gap-1.5 text-[11px] text-white-15">
+              {/* sky dot — the "fresh start" cue. 1.5px, no background. */}
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-sky" />
               No sessions yet. Start a conversation.
             </span>
           </div>
@@ -421,35 +439,15 @@ function formatRelativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-// ── Toggle button (shown when both panels are closed) ────────────────────
-
-export function SidebarToggleFloating({ onToggle }: { onToggle: () => void }) {
-  const chatHeaderHeight = useStore((s) => s.chatHeaderHeight);
-  return (
-    <button
-      onClick={onToggle}
-      // `!fixed` (Tailwind's `!` important prefix) is required because
-      // `.glass-quartz` sets `position: relative` for its ::before/::after
-      // pseudo-elements, and the custom CSS loads after Tailwind utilities.
-      className="glass-quartz glass-quartz--pill !fixed left-3 z-50 flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
-      style={{ top: chatHeaderHeight + SIDEBAR_GAP }}
-      title="Show sidebar"
-      aria-label="Show sidebar"
-    >
-      <PanelLeftOpen size={16} />
-    </button>
-  );
-}
-
 // ── Close button (lives inside the column at the top of the Content
 //    panel header, next to the "Content" label) ───────────────────────────
 //
-// Same 34×34 as the open toggle so the two read as a pair, just on
+// Same 34×34 as the topbar toggle so the two read as a pair, just on
 // opposite sides of the open/close flow. The close lives inside the
 // column on purpose: it's next to the content it dismisses, not
-// floating at a global anchor like the open toggle.
+// at a global anchor like the topbar toggle.
 
-// ── Public component (mounts the column + the open toggle) ──────────────
+// ── Public component (mounts the column) ─────────────────────────────────
 
 export function Sidebar() {
   const { sidebarOpen, setSidebarOpen, chatHeaderHeight } = useStore();
@@ -460,7 +458,6 @@ export function Sidebar() {
 
   return (
     <>
-      {!sidebarOpen && <SidebarToggleFloating onToggle={() => setSidebarOpen(true)} />}
       <div
         {...(!sidebarOpen ? { inert: "" } : {})}
         aria-label="Sidebar"

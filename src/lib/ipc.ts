@@ -50,6 +50,10 @@ export interface SessionMessage {
   mentions?: Mention[];
   agentId?: string;
   agentName?: string;
+  /** Chain-of-thought captured for thinking-capable models. The
+   *  frontend renders this in a collapsible "Thinking" block above
+   *  the message body when present. */
+  reasoning?: string;
 }
 
 export type ActionMode = "auto" | "askRisky" | "askAll";
@@ -64,6 +68,12 @@ export interface ToolActivity {
   status: ToolActivityStatus;
   /** ISO 8601 UTC string. */
   timestamp: string;
+  /** requestId of the agent turn that ran this tool (absent on
+   *  non-tool records like turn errors). Used to attach tool calls
+   *  to their assistant message in the chat. */
+  requestId?: string;
+  /** Raw JSON arguments of the call, for display in the chat. */
+  arguments?: unknown;
 }
 
 /** Snapshot of the agent personality that drives a session. */
@@ -94,6 +104,22 @@ export interface Session {
     cumulativeOut: number;
     sessionWindowUsed: number | null;
     sessionWindowResetsAt: string | null;
+  } | null;
+  /**
+   * Disk-based completion signal written by the agent loop on every
+   * terminal transition. When the streaming events don't reach the
+   * WebView (the cause of the "responses only show after refresh"
+   * bug), the file watcher reads this and applies the terminal state.
+   */
+  lastTurn?: {
+    requestId: string;
+    status: "done" | "error" | "cancelled";
+    at: string;
+    /** Mirrored from the agent loop so the file-watcher fallback
+     *  (which fixes the "responses only show after refresh" bug)
+     *  can apply the captured chain-of-thought when the streaming
+     *  events never reach the WebView. */
+    reasoning?: string;
   } | null;
 }
 
@@ -156,8 +182,32 @@ export interface SavedModel {
   hasKey: boolean;
   /** true when the OS keyring returned an error while checking this row. */
   keyUnreachable: boolean;
+  /** User-set context window override (tokens). When omitted, the
+   *  frontend falls back to the catalog + inference. */
+  contextWindow?: number | null;
+  /** User-set reasoning capability. When omitted, inferred from the
+   *  most recent probe (if any) and then a name/format heuristic. */
+  reasoningCapability?: ReasoningKind | null;
+  /** Subset of effort levels the model supports. When omitted or
+   *  empty, the canonical low/medium/high set is shown. */
+  reasoningLevels?: Array<"low" | "medium" | "high"> | null;
+  /** Most recent capability probe result (Anthropic Models API hit
+   *  or a smoke test). Purely informational; used to seed the
+   *  inference chain and to render "Last checked" in the UI. */
+  capabilityProbe?: CapabilityProbe | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type ReasoningKind = "none" | "thinking" | "effort";
+
+export interface CapabilityProbe {
+  probedAt: string;
+  source: string;
+  contextWindow?: number | null;
+  reasoning?: ReasoningKind | null;
+  reasoningLevels?: Array<"low" | "medium" | "high"> | null;
+  note?: string | null;
 }
 
 /** Input shape for save_saved_model. `apiKey` travels as a separate
@@ -170,6 +220,14 @@ export interface SavedModelInput {
   format: string;
   baseUrl: string;
   modelName: string;
+  /** User-set context window override. `null`/omitted = no override. */
+  contextWindow?: number | null;
+  /** User-set reasoning capability override. `null`/omitted = no override. */
+  reasoningCapability?: ReasoningKind | null;
+  /** User-set effort-level subset. `null`/omitted = no override. */
+  reasoningLevels?: ReasoningEffort[] | null;
+  /** Most recent capability probe result to persist. */
+  capabilityProbe?: CapabilityProbe | null;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high";
@@ -203,6 +261,14 @@ export interface ChatChunk {
   delta: string;
 }
 
+/** Chain-of-thought delta, emitted alongside `chat-chunk` for
+ *  thinking-capable models. The frontend buffers these into the
+ *  hidden "Thinking" block on the assistant message. */
+export interface ChatReasoning {
+  requestId: string;
+  delta: string;
+}
+
 export interface ChatUsage {
   input: number;
   output: number;
@@ -216,6 +282,9 @@ export interface ChatSessionWindow {
 export interface ChatDone {
   requestId: string;
   content: string;
+  /** Full chain-of-thought captured for thinking-capable models.
+   *  Empty when the model didn't emit reasoning. */
+  reasoning?: string;
   usage: ChatUsage;
   sessionWindow?: ChatSessionWindow;
 }
@@ -262,6 +331,10 @@ export interface AgentTurnRequest {
   actionMode: ActionMode;
   goalMode: boolean;
   workspace: string;
+  /** Optional reasoning-effort level forwarded to the provider so
+   *  reasoning-capable models return chain-of-thought. `undefined`
+   *  for non-reasoning models or when the user has reasoning off. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 // Agent loop events (Rust → TS), routed by `requestId`.
@@ -271,6 +344,12 @@ export interface AgentTurnStart {
 }
 
 export interface AgentChunk {
+  requestId: string;
+  delta: string;
+}
+
+/** Chain-of-thought delta for the agent loop, sibling of `AgentChunk`. */
+export interface AgentReasoning {
   requestId: string;
   delta: string;
 }
@@ -307,6 +386,8 @@ export interface AgentApprovalResult {
 export interface AgentDone {
   requestId: string;
   content: string;
+  /** Full chain-of-thought captured for thinking-capable models. */
+  reasoning?: string;
   usage: ChatUsage;
 }
 
@@ -381,6 +462,8 @@ export const ipc = {
     invoke<void>("set_model_prefs", { id, prefs }),
   testSavedModel: (id: string) =>
     invoke<TestResult>("test_saved_model", { id }),
+  probeSavedModel: (id: string) =>
+    invoke<CapabilityProbe>("probe_saved_model", { id }),
   resetSecretStore: () => invoke<void>("reset_secret_store"),
 
   // Chat streaming (Phase 2.0)
@@ -432,6 +515,7 @@ export const ipc = {
       actionMode: req.actionMode,
       goalMode: req.goalMode,
       workspace: req.workspace,
+      reasoningEffort: req.reasoningEffort,
     }),
   respondApproval: (requestId: string, allow: boolean) =>
     invoke<void>("respond_approval", { requestId, allow }),
@@ -446,6 +530,8 @@ export const ipc = {
 export const chatEvents = {
   onChunk: (fn: (e: ChatChunk) => void) =>
     listen<ChatChunk>("chat-chunk", (e) => fn(e.payload)),
+  onReasoning: (fn: (e: ChatReasoning) => void) =>
+    listen<ChatReasoning>("chat-reasoning", (e) => fn(e.payload)),
   onDone: (fn: (e: ChatDone) => void) =>
     listen<ChatDone>("chat-done", (e) => fn(e.payload)),
   onError: (fn: (e: ChatError) => void) =>
@@ -461,6 +547,8 @@ export const agentEvents = {
     listen<AgentTurnStart>("agent-turn-start", (e) => fn(e.payload)),
   onChunk: (fn: (e: AgentChunk) => void) =>
     listen<AgentChunk>("agent-chunk", (e) => fn(e.payload)),
+  onReasoning: (fn: (e: AgentReasoning) => void) =>
+    listen<AgentReasoning>("agent-reasoning", (e) => fn(e.payload)),
   onToolStart: (fn: (e: AgentToolStart) => void) =>
     listen<AgentToolStart>("agent-tool-start", (e) => fn(e.payload)),
   onToolResult: (fn: (e: AgentToolResult) => void) =>

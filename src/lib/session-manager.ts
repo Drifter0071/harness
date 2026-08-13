@@ -18,10 +18,12 @@ import type {
   ActionMode,
   AgentSnapshot,
   AgentTurnRequest,
+  ReasoningEffort,
   Session,
   ToolActivity,
 } from "./ipc";
-import type { SessionMessage, TokenStats } from "./store";
+import type { SessionMessage, TokenStats, ToolCallRecord } from "./store";
+import { capabilitiesFor } from "./model-capabilities";
 import { showToast } from "./toast";
 
 const DEBOUNCE_MS = 500;
@@ -64,6 +66,23 @@ async function refreshSessions(projectPath: string): Promise<void> {
 }
 
 async function saveNow(snapshot: PendingSnapshot): Promise<void> {
+  // Preserve backend-authored fields the frontend snapshot doesn't own.
+  // The Rust agent loop stamps `tokenStats` + `lastTurn` into the file on
+  // every terminal persist; a debounced frontend save can land right
+  // after a turn when the store's `tokenStats` is still null (terminal
+  // event lost — the disk-fallback path) and would otherwise wipe both
+  // fields from disk.
+  let lastTurn: Session["lastTurn"] = null;
+  let diskTokenStats: TokenStats | null = null;
+  try {
+    const existing = await ipc.loadSession(snapshot.projectPath, snapshot.sessionId);
+    if (existing) {
+      lastTurn = existing.lastTurn ?? null;
+      diskTokenStats = existing.tokenStats ?? null;
+    }
+  } catch {
+    // Best-effort: fall back to the snapshot alone.
+  }
   const session: Session = {
     version: 2,
     id: snapshot.sessionId,
@@ -76,7 +95,8 @@ async function saveNow(snapshot: PendingSnapshot): Promise<void> {
     actionMode: snapshot.actionMode,
     messages: snapshot.messages,
     activities: snapshot.activities,
-    tokenStats: snapshot.tokenStats ?? null,
+    tokenStats: snapshot.tokenStats ?? diskTokenStats,
+    lastTurn,
   };
   try {
     const saved = await ipc.saveSession(snapshot.projectPath, session);
@@ -93,11 +113,19 @@ async function saveNow(snapshot: PendingSnapshot): Promise<void> {
 
 function captureSnapshot(): PendingSnapshot | null {
   const st = useStore.getState();
-  if (!st.workspacePath || !st.activeSessionId || !st.sessionLoaded) return null;
+  // During a session switch the store is briefly inconsistent:
+  // `activeSessionId` already points at the target session while
+  // `messages`/`activities` still belong to the loaded one. Always
+  // persist under the session the in-memory state actually belongs
+  // to (`loadedSessionId`) — otherwise the flush triggered by a
+  // switch writes the outgoing session's history into the target
+  // session's file, which is the "switching sessions shows the
+  // wrong conversation / corrupts history" bug.
+  if (!st.workspacePath || !loadedSessionId || !st.sessionLoaded) return null;
   return {
     projectPath: st.workspacePath,
-    sessionId: st.activeSessionId,
-    title: st.sessions.find((s) => s.id === st.activeSessionId)?.title ?? "New session",
+    sessionId: loadedSessionId,
+    title: st.sessions.find((s) => s.id === loadedSessionId)?.title ?? "New session",
     messages: st.messages,
     activities: st.activities,
     tokenStats: st.tokenStats,
@@ -109,10 +137,16 @@ function captureSnapshot(): PendingSnapshot | null {
 }
 
 function scheduleSave(): void {
+  const st = useStore.getState();
   // While an agent turn runs, the Rust loop persists messages, activities
   // and token stats itself. A concurrent debounced write could clobber the
   // newer state, so the frontend defers until the turn ends.
-  if (useStore.getState().agentRequestId) return;
+  if (st.agentRequestId) return;
+  // Mid-switch (or right after "new session" creation) the store is
+  // inconsistent: activeSessionId targets a session whose messages
+  // haven't been loaded yet. Saving now would write the outgoing
+  // session's content under the incoming session's id.
+  if (st.activeSessionId !== loadedSessionId) return;
   const snapshot = captureSnapshot();
   if (!snapshot) return;
   pending = snapshot;
@@ -144,10 +178,31 @@ export async function flushPendingSave(): Promise<void> {
 function applySession(session: Session, projectPath: string): void {
   currentAgent = session.agent;
   loadedSessionId = session.id;
+  // Heal legacy files where the agent loop persisted one assistant
+  // row per round under the same `agent-<requestId>` id: keep only
+  // the last occurrence so blank intermediate tool-round rows
+  // disappear from the chat instead of rendering as empty bubbles.
+  const messages = dedupeById(session.messages);
+  // Rebuild the per-message tool-call display from persisted activities.
+  // Each activity carries the requestId of the turn that ran it, which
+  // maps to the assistant placeholder id `agent-<requestId>`.
+  const toolCalls: Record<string, ToolCallRecord[]> = {};
+  for (const a of session.activities) {
+    if (!a.requestId) continue;
+    const messageId = `agent-${a.requestId}`;
+    (toolCalls[messageId] ??= []).push({
+      id: a.id,
+      name: a.tool,
+      arguments: stringifyArgs(a.arguments),
+      status: a.status,
+      summary: a.summary,
+    });
+  }
   useStore.setState({
     activeSessionId: session.id,
-    messages: session.messages,
+    messages,
     activities: session.activities,
+    toolCalls,
     sessionMeta: { createdAt: session.createdAt, updatedAt: session.updatedAt },
     tokenStats: session.tokenStats ?? null,
     goalMode: session.goalMode,
@@ -155,6 +210,103 @@ function applySession(session: Session, projectPath: string): void {
     sessionLoaded: true,
   });
   refreshSessions(projectPath);
+}
+
+/** Compact JSON of tool-call arguments for the chat display. */
+function stringifyArgs(args: unknown): string | undefined {
+  if (args === undefined || args === null) return undefined;
+  try {
+    const s = typeof args === "string" ? args : JSON.stringify(args);
+    return s.length > 0 ? s : undefined;
+  } catch {
+    return String(args);
+  }
+}
+
+/** Collapse duplicate message ids, keeping the last occurrence. */
+function dedupeById(msgs: SessionMessage[]): SessionMessage[] {
+  const byId = new Map<string, SessionMessage>();
+  for (const m of msgs) byId.set(m.id, m);
+  return [...byId.values()];
+}
+
+/**
+ * Disk-based completion reconciliation while a turn is in flight (or
+ * just ended).
+ *
+ * If the agent loop finished and stamped `lastTurn` on the session file
+ * but the terminal event never reached the WebView (the cause of the
+ * "responses only show after refresh" bug), pull the terminal state
+ * from disk and apply it. Streaming text and tool activities are NOT
+ * touched here — the in-memory store remains the source for the
+ * partially-streamed message, which the agent loop's `assistant`
+ * message in `session.messages` matches by id on the next normal
+ * reload.
+ *
+ * The `agentRequestId` guard is loosened so the polling fallback can
+ * still reconcile a just-completed turn whose `agentRequestId` was
+ * already cleared by an in-process event that didn't apply the
+ * content (the racy case where the file watcher fired and cleared
+ * state first, but the placeholder was never updated).
+ */
+function applyTurnCompletionFromDisk(session: Session): void {
+  const st = useStore.getState();
+  const marker = session.lastTurn;
+  if (!marker) return;
+  // Match the in-flight turn when possible, otherwise match any
+  // agent- placeholder that still has empty content. The latter is
+  // the post-turn recovery case.
+  const inFlight = st.agentRequestId;
+  const isInFlight = inFlight !== null && marker.requestId === inFlight;
+  const placeholderId = `agent-${marker.requestId}`;
+  const inMemory = st.messages.find((m) => m.id === placeholderId);
+  if (!isInFlight && !(inMemory && (inMemory.content ?? "").length === 0)) {
+    return;
+  }
+
+  // The agent loop writes the full assistant message into the session
+  // file on terminal. Merge that single message into our in-memory
+  // store (idempotent: it has the same id as our placeholder), then
+  // clear the in-flight state exactly the way the agent-done event
+  // handler does.
+  const onDisk = session.messages.find((m) => m.id === placeholderId);
+  if (onDisk) {
+    const merged = st.messages.map((m) =>
+      m.id === placeholderId
+        ? { ...m, content: onDisk.content, reasoning: onDisk.reasoning }
+        : m,
+    );
+    useStore.setState({ messages: merged });
+  } else if (marker.reasoning && marker.reasoning.length > 0) {
+    // The assistant message may not be on disk yet, but the
+    // `lastTurn.reasoning` mirror carries the chain-of-thought. Apply
+    // it to the in-memory placeholder so the user sees the
+    // collapsible block once the WebView recovers.
+    const merged = st.messages.map((m) =>
+      m.id === placeholderId
+        ? { ...m, reasoning: marker.reasoning }
+        : m,
+    );
+    useStore.setState({ messages: merged });
+  }
+
+  // The backend stamps token telemetry into the session file on every
+  // terminal persist. Apply it here too: the `agent-done` event is the
+  // primary channel, but when it never reaches the WebView (the known
+  // event-delivery gap this fallback exists for), disk is the only
+  // source and the header stats would otherwise stay on "—".
+  if (session.tokenStats) {
+    useStore.setState({ tokenStats: session.tokenStats });
+  }
+
+  if (marker.status === "cancelled") {
+    useStore.setState({ pendingApproval: null });
+  }
+  if (isInFlight) {
+    useStore.setState({ agentRequestId: null, jobActivities: [] });
+  }
+  // Let the debounced save pick up the final state.
+  scheduleSave();
 }
 
 async function loadProject(path: string): Promise<void> {
@@ -252,6 +404,23 @@ export async function startAgentTurn(
   st.setAgentRequestId(requestId);
   st.setPendingApproval(null);
 
+  // Resolve the active model's reasoning capability so the agent
+  // loop can forward `reasoning_effort` to OpenAI-compat gateways.
+  // Mirrors the chat path: for "thinking"-capable models the user
+  // toggle is the trigger, for "effort"-capable models we use the
+  // user's selected level. Without this, agent turns on reasoning
+  // models would never return `delta.reasoning_content`.
+  const activeModel = st.savedModels.find((m) => m.id === st.activeModelId) ?? null;
+  let reasoningEffort: ReasoningEffort | undefined;
+  if (activeModel) {
+    const caps = capabilitiesFor(activeModel);
+    if (caps.reasoning === "effort") {
+      reasoningEffort = st.modelPrefs.reasoningEffort;
+    } else if (caps.reasoning === "thinking" && st.modelPrefs.thinkingOn) {
+      reasoningEffort = st.modelPrefs.reasoningEffort ?? "medium";
+    }
+  }
+
   const req: AgentTurnRequest = {
     requestId,
     sessionId: st.activeSessionId,
@@ -260,6 +429,7 @@ export async function startAgentTurn(
     actionMode: st.actionMode,
     goalMode: st.goalMode,
     workspace: st.workspacePath,
+    reasoningEffort,
   };
   try {
     await ipc.runAgentTurn(req);
@@ -333,15 +503,33 @@ function useAgentEvents(): void {
         listen<{ path: string }>("session-file-changed", async () => {
           const st = useStore.getState();
           if (!st.workspacePath || !st.activeSessionId) return;
-          // Skip if a streaming turn is in flight — the in-memory
-          // store is ahead of disk and re-reading would clobber it.
-          if (st.streamingRequestId || st.agentRequestId) return;
+          // If no turn is in flight, a full reload is safe: disk is the
+          // source of truth.
+          if (!st.streamingRequestId && !st.agentRequestId) {
+            try {
+              const session = await ipc.loadSession(
+                st.workspacePath,
+                st.activeSessionId,
+              );
+              if (session) applySession(session, st.workspacePath);
+            } catch {
+              // Best-effort.
+            }
+            return;
+          }
+          // A turn is in flight. The in-memory store is ahead of disk
+          // for the streaming message, so we can't just replace the
+          // whole session. Instead: only consult the disk for the
+          // `lastTurn` completion signal — that's the only authoritative
+          // data we don't already have locally. The streaming state
+          // itself still relies on the in-process events (chunks,
+          // tool-result) which carry the in-flight content.
           try {
             const session = await ipc.loadSession(
               st.workspacePath,
               st.activeSessionId,
             );
-            if (session) applySession(session, st.workspacePath);
+            if (session) applyTurnCompletionFromDisk(session);
           } catch {
             // Best-effort.
           }
@@ -371,14 +559,28 @@ function useAgentEvents(): void {
 
     unsubs.push(
       reg(
+        agentEvents.onReasoning((e) => {
+          const st = useStore.getState();
+          if (st.agentRequestId !== e.requestId) return;
+          ensurePlaceholder(e.requestId);
+          st.appendReasoning(placeholderId(e.requestId), e.delta);
+        })
+      )
+    );
+
+    unsubs.push(
+      reg(
         agentEvents.onToolStart((e) => {
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
-          // Transient live entry; the persisted record lands on tool-result.
-          st.setJobActivities([
-            ...st.jobActivities,
-            `run ${e.name} ${JSON.stringify(e.arguments) ?? ""}`.trim(),
-          ]);
+          // Live "running" entry on the assistant message; the persisted
+          // record lands on tool-result.
+          st.appendToolCall(placeholderId(e.requestId), {
+            id: e.callId,
+            name: e.name,
+            arguments: stringifyArgs(e.arguments),
+            status: "running",
+          });
         })
       )
     );
@@ -388,12 +590,18 @@ function useAgentEvents(): void {
         agentEvents.onToolResult((e) => {
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
+          // Finalize the inline chat block.
+          st.updateToolCall(placeholderId(e.requestId), e.callId, {
+            status: e.status,
+            summary: e.summary,
+          });
           const activity: ToolActivity = {
             id: crypto.randomUUID(),
             tool: e.name,
             summary: e.summary,
             status: e.status,
             timestamp: new Date().toISOString(),
+            requestId: e.requestId,
           };
           st.appendActivity(activity);
         })
@@ -430,10 +638,31 @@ function useAgentEvents(): void {
       reg(
         agentEvents.onDone((e) => {
           const st = useStore.getState();
-          if (st.agentRequestId !== e.requestId) return;
+          // The file-watcher fallback (applyTurnCompletionFromDisk)
+          // can race with this event and clear `agentRequestId` first
+          // when the agent's terminal write hits the disk before the
+          // in-process event reaches the WebView. The watcher already
+          // copied the final content into the placeholder in that
+          // case, but we still re-apply the in-process event's
+          // authoritative content + reasoning so any final-round
+          // additions the disk hadn't caught yet land in the UI. The
+          // only reason to bail is when a *different* turn's done
+          // event arrives (stale), which would clobber the active
+          // placeholder.
+          if (
+            st.agentRequestId !== null &&
+            st.agentRequestId !== e.requestId
+          ) {
+            return;
+          }
           ensurePlaceholder(e.requestId);
-          // Replace the streamed placeholder with the final text.
-          st.updateMessage(placeholderId(e.requestId), { content: e.content });
+          // Replace the streamed placeholder with the final text +
+          // reasoning (if the backend bundled it).
+          st.updateMessage(placeholderId(e.requestId), {
+            content: e.content,
+            reasoning:
+              e.reasoning && e.reasoning.length > 0 ? e.reasoning : undefined,
+          });
           st.setJobActivities([]);
           // Token telemetry: cumulativeIn is the PEAK input (max), cumulativeOut is a sum.
           const lastIn = e.usage?.input ?? 0;
@@ -543,7 +772,67 @@ export function useProjectLifecycle(): void {
       const target = state.activeSessionId;
       await flushPendingSave();
       const session = await ipc.loadSession(state.workspacePath, target).catch(() => null);
+      // A newer click may have landed while we were loading; only
+      // apply when this target is still the active one, so rapid
+      // switching settles on the last-clicked session.
+      if (useStore.getState().activeSessionId !== target) return;
       if (session) applySession(session, state.workspacePath);
+      // Keep the `.active` marker in sync so reopening the project
+      // lands on the last-viewed session, not the last-created one.
+      ipc.setActiveSession(state.workspacePath, target).catch(() => {});
     });
+  }, []);
+
+  // Polling fallback for the "responses only show after refresh" bug.
+  // The session file watcher is the primary signal, but on some
+  // platforms (and during heavy multi-tool turns) it can miss the
+  // final persist. A 1s tick polls the session file and reconciles
+  // any deltas. We keep running after a turn ends so the polling
+  // can also catch the post-turn `lastTurn` write that the
+  // `applyTurnCompletionFromDisk` path needs to apply the final
+  // assistant content into the in-memory placeholder. The
+  // "stale empty placeholder" filter keeps this from needlessly
+  // reloading the session in the common case.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      const st = useStore.getState();
+      if (!st.workspacePath || !st.activeSessionId) {
+        timer = setTimeout(tick, 1000);
+        return;
+      }
+      // Look for an unresolved placeholder: an assistant message with
+      // an `agent-` prefix and empty content. If we find one, the
+      // disk is the source of truth and the polling will keep
+      // re-reading until it has the final state.
+      const hasEmptyAgentPlaceholder = st.messages.some(
+        (m) =>
+          m.role === "assistant" &&
+          m.id.startsWith("agent-") &&
+          (m.content ?? "").length === 0,
+      );
+      const turnInFlight = !!st.agentRequestId;
+      if (!hasEmptyAgentPlaceholder && !turnInFlight) {
+        timer = setTimeout(tick, 1000);
+        return;
+      }
+      try {
+        const session = await ipc.loadSession(
+          st.workspacePath,
+          st.activeSessionId,
+        );
+        if (session) applyTurnCompletionFromDisk(session);
+      } catch {
+        // Best-effort.
+      }
+      timer = setTimeout(tick, 1000);
+    };
+    timer = setTimeout(tick, 1000);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 }

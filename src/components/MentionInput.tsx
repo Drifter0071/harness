@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { parseMentionQuery, rankMentionResults } from "../lib/mention-utils";
 import { FileTypeIcon } from "../lib/file-icons";
+import { TypingBuddy, type BuddyMode } from "./AgentMascot";
 import type { Mention } from "../lib/store";
 
 interface Props {
@@ -35,6 +36,26 @@ export function MentionInput({
     results: [],
     selectedIndex: 0,
   });
+
+  // Bip sits inside the composer while the user types: tapping keys
+  // while the draft grows, whipping out a tiny broom on backspace.
+  const [buddyMode, setBuddyMode] = useState<BuddyMode>("typing");
+  const prevLen = useRef(0);
+  useEffect(() => {
+    const len = value.length;
+    if (len === 0) {
+      prevLen.current = 0;
+      return;
+    }
+    if (prevLen.current > len) {
+      setBuddyMode("sweeping");
+      const t = setTimeout(() => setBuddyMode("typing"), 800);
+      prevLen.current = len;
+      return () => clearTimeout(t);
+    }
+    prevLen.current = len;
+    setBuddyMode("typing");
+  }, [value]);
 
   // Update popover position + results whenever the textarea caret moves
   // and the mention is "active".
@@ -166,8 +187,16 @@ export function MentionInput({
         disabled={disabled}
         rows={1}
         className="flex-1 bg-transparent text-[14px] leading-relaxed text-white px-4 py-3 my-1.5 resize-none outline-none placeholder:text-white-30 disabled:opacity-50 disabled:pointer-events-none"
-        style={{ minHeight: "44px", maxHeight: "200px" }}
+        style={{ minHeight: "44px", maxHeight: "200px", caretColor: "#5bc9ff" }}
       />
+      {value.length > 0 && !disabled && (
+        <div
+          className="flex items-center self-center pr-2 shrink-0 select-none"
+          title="Bip — typing buddy"
+        >
+          <TypingBuddy mode={buddyMode} size={16} />
+        </div>
+      )}
       {popover.open && (
         <div className="absolute left-0 right-0 bottom-full z-50 glass-mist mention-popover animate-mention-in flex flex-col overflow-hidden">
           <div className="px-2 py-1 text-[10px] text-white-15 uppercase tracking-wider border-b border-border-subtle flex items-center justify-between">

@@ -28,6 +28,15 @@ export default {
           error: "#ef4444",
           info: "#3b82f6",
         },
+        // Cartoonish accents — scattered sparingly over the monochrome
+        // base (mascot, status glows, tiny details). Never the majority.
+        accent: {
+          coral: "#ff6b5e",
+          sun: "#ffc94d",
+          mint: "#54e3a8",
+          lilac: "#b28dff",
+          sky: "#5bc9ff",
+        },
       },
       fontFamily: {
         sans: [

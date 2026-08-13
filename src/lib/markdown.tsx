@@ -1,9 +1,12 @@
 // Markdown rendering pipeline. Lazy-loads KaTeX, Mermaid, and the image
 // lightbox the first time they're needed.
 
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
 import { marked } from "marked";
+import { Check, Copy } from "lucide-react";
 import { filterAndSanitizeUrl, stripEventHandlers } from "./mention-utils";
+import { highlightCode } from "./highlight";
 
 // ── Marked configuration ──
 
@@ -227,6 +230,7 @@ export function MessageBody({ content }: { content: string }) {
   // the DOM. The `useEffect` runs after `dangerouslySetInnerHTML` has
   // injected the elements.
   const [tick, setTick] = useState(0);
+  const proseRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // Force a re-render after the HTML is injected so the children
     // findDOMNode() picks up the freshly-mounted placeholders.
@@ -237,9 +241,12 @@ export function MessageBody({ content }: { content: string }) {
   return (
     <>
       <div
+        ref={proseRef}
         className="prose-harness"
         dangerouslySetInnerHTML={{ __html: processed.html }}
       />
+      {/* Decorate code blocks with a language label + copy button. */}
+      <CodeBlockDecorator scopeRef={proseRef} html={processed.html} />
       {/* tick: re-render trigger; mount lazy hosts whenever needed */}
       {processed.needsMermaid && (
         <HostMounts selector={`.mermaid-host`} key={`mermaid-${tick}`}>
@@ -269,6 +276,112 @@ export function MessageBody({ content }: { content: string }) {
 // the placeholder's content after the lazy module loads.
 import { createRoot, type Root } from "react-dom/client";
 import { createElement } from "react";
+
+// ── Code block toolbar (language label + copy) ──
+//
+// The prose HTML is inert from React's perspective, so we decorate each
+// `pre` block by direct DOM mutation and mount the copy control with its
+// own root. Scoped to this message's own prose container — every message
+// runs its own pass, and the whole subtree is rebuilt on every streamed
+// chunk (html change → fresh decorator run).
+
+function CodeBlockDecorator({
+  scopeRef,
+  html,
+}: {
+  scopeRef: RefObject<HTMLDivElement | null>;
+  html: string;
+}) {
+  useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope) return;
+    const roots: Root[] = [];
+    for (const pre of Array.from(scope.querySelectorAll<HTMLPreElement>("pre"))) {
+      if (pre.dataset.decorated === "1") continue;
+      pre.dataset.decorated = "1";
+      const code = pre.querySelector("code");
+      // Read the declared language first — highlightAuto mutates the
+      // class with its guess, which we don't want to show as a label.
+      const lang = code?.className.match(/language-([\w#+-]+)/)?.[1];
+      if (code) highlightCode(code);
+      if (lang) pre.dataset.lang = lang;
+      const bar = document.createElement("div");
+      bar.className = "code-toolbar";
+      const label = document.createElement("span");
+      label.className = "code-toolbar__lang";
+      label.textContent = lang ?? "";
+      const host = document.createElement("span");
+      host.className = "code-toolbar__copy";
+      bar.append(label, host);
+      pre.prepend(bar);
+      const root = createRoot(host);
+      roots.push(root);
+      root.render(
+        <CopyButton getText={() => code?.textContent ?? pre.textContent ?? ""} />
+      );
+    }
+    return () => {
+      // Defer the nested-root unmounts one microtask: unmounting a root
+      // synchronously while React is committing the parent's unmount
+      // triggers a React 18.3 dev warning (and can race the fresh pass).
+      const pending = roots;
+      queueMicrotask(() => {
+        pending.forEach((r) => r.unmount());
+      });
+    };
+  }, [html, scopeRef]);
+  return null;
+}
+
+/** Copy control mounted inside each fenced code block. */
+function CopyButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | undefined>(undefined);
+  const onCopy = async () => {
+    const ok = await copyTextToClipboard(getText());
+    if (!ok) return;
+    setCopied(true);
+    window.clearTimeout(resetTimer.current);
+    resetTimer.current = window.setTimeout(() => setCopied(false), 1600);
+  };
+  useEffect(() => {
+    return () => window.clearTimeout(resetTimer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      className="code-copy"
+      onClick={onCopy}
+      aria-label="Copy code"
+      title="Copy code"
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+}
+
+/** Clipboard write with a legacy fallback for WebView permission gaps. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // fall through to the textarea path
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  try {
+    ta.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
 
 function HostMounts({
   selector,
@@ -301,9 +414,14 @@ function HostMounts({
       );
     }
     return () => {
-      roots.forEach((r) => r.unmount());
-      elements.forEach((el) => {
-        delete el.dataset.mounted;
+      // Deferred unmounts — see CodeBlockDecorator above.
+      const pending = roots;
+      const els = elements;
+      queueMicrotask(() => {
+        pending.forEach((r) => r.unmount());
+        els.forEach((el) => {
+          delete el.dataset.mounted;
+        });
       });
     };
     // children is a fresh closure per render; re-running when tick changes

@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import { ActiveJobBar } from "./components/ActiveJobBar";
+import { TitleBar } from "./components/TitleBar";
+import { ChatHeader } from "./components/ChatHeader";
 import { DynamicCanvas } from "./components/DynamicCanvas";
 import { Sidebar } from "./components/Sidebar";
 import { Settings } from "./components/Settings";
@@ -28,7 +30,15 @@ function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-0 overflow-hidden relative">
-      <ActiveJobBar />
+      <TitleBar />
+      {/* Top zone: pill row (row 1) + stats row (row 2) share the same
+          3-column tracks (1fr / auto / 1fr). The center column auto-sizes
+          to fit Bip and the stats row, so the stats line is visually
+          anchored directly under Bip and never drifts to one side. */}
+      <div className="px-3 grid grid-cols-[1fr_auto_1fr] gap-2 items-start">
+        <ActiveJobBar />
+        <ChatHeader />
+      </div>
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <div className="flex-1 flex flex-col overflow-hidden">
