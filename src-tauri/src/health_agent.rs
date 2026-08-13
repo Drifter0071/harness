@@ -20,14 +20,16 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Emitter;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
 use crate::commands::AppState;
 use crate::hci::auth::AuthState;
-use crate::hci::router::{ConnectionCtx, RpcContext, Router};
+use crate::hci::router::{ConnectionCtx, Router, RpcContext};
 use crate::hci::CanvasEventBus;
+use crate::tools::{BipMood, BipSource, BipState};
 
 /// Health Agent configuration. Persisted in the workspace settings
 /// (or `localStorage` for v0).
@@ -84,12 +86,7 @@ pub enum Verdict {
 /// Tests: returns a canned verdict.
 #[async_trait::async_trait]
 pub trait LlmCaller: Send + Sync {
-    async fn call(
-        &self,
-        prompt: String,
-        tools: Value,
-        timeout_ms: u64,
-    ) -> Result<Value, String>;
+    async fn call(&self, prompt: String, tools: Value, timeout_ms: u64) -> Result<Value, String>;
 }
 
 /// Heuristic-only caller used in v0. Returns `Ok` unless one of the
@@ -135,11 +132,18 @@ pub struct AlertRecord {
 impl HealthAgent {
     /// Start the Health Agent's tick loop. The loop runs on
     /// `tokio::spawn` and returns immediately.
+    ///
+    /// `app_handle` is held by the tick loop so each tick can publish
+    /// the resulting `bip-state` to the WebView (Bip is the visible
+    /// face of the Health Agent — every tick ends with a bip update).
+    /// It's `Option` so unit tests can skip the Tauri runtime and
+    /// still exercise the lock + log paths.
     pub fn start(
         cfg: HealthConfig,
         router: Arc<Router>,
         auth: Arc<AuthState>,
         app: Arc<AppState>,
+        app_handle: Option<tauri::AppHandle>,
         canvas_bus: CanvasEventBus,
     ) -> Self {
         let started_at = chrono::Utc::now();
@@ -147,7 +151,7 @@ impl HealthAgent {
             writes_enabled: crate::hci::integration::hci_write_enabled(),
             auth: Some(auth),
             started_at,
-            app: Some(app),
+            app: Some(app.clone()),
             canvas_bus: Some(canvas_bus),
         };
         let shutdown = Arc::new(Notify::new());
@@ -160,7 +164,17 @@ impl HealthAgent {
             let shutdown = shutdown.clone();
             let alert_log = alert_log.clone();
             tokio::spawn(async move {
-                run_tick_loop(cfg, router, rpc_ctx, shutdown, alert_log, HeuristicCaller).await;
+                run_tick_loop(
+                    cfg,
+                    router,
+                    rpc_ctx,
+                    shutdown,
+                    alert_log,
+                    HeuristicCaller,
+                    app,
+                    app_handle,
+                )
+                .await;
             })
         };
 
@@ -218,7 +232,9 @@ impl HealthAgent {
     /// special-case to bypass the auth gate. For v0 the router is not
     /// called from the Health Agent at all, so the value is unused.
     pub fn in_process_conn(&self) -> ConnectionCtx {
-        ConnectionCtx { session_token: "in-process".into() }
+        ConnectionCtx {
+            session_token: "in-process".into(),
+        }
     }
 }
 
@@ -235,6 +251,8 @@ async fn run_tick_loop(
     shutdown: Arc<Notify>,
     alert_log: Arc<std::sync::Mutex<Vec<AlertRecord>>>,
     caller: impl LlmCaller,
+    app: Arc<AppState>,
+    app_handle: Option<tauri::AppHandle>,
 ) {
     if !cfg.enabled {
         return;
@@ -265,6 +283,27 @@ async fn run_tick_loop(
                     let len = g.len();
                     if len > 200 {
                         g.drain(0..(len - 200));
+                    }
+                }
+                // Publish the verdict as Bip's expression. This is
+                // the contract: every tick ends with a `bip-state`
+                // update; the personality then "despawns" until the
+                // next tick wakes a fresh one. See
+                // docs/superpowers/specs/2026-08-13--bip-mascot-tool.md.
+                let (mood, thought) = verdict_to_bip(&verdict);
+                if let Some(handle) = app_handle.as_ref() {
+                    emit_bip_update(&app, handle, mood, thought).await;
+                } else {
+                    // Tests path: still update the lock so the in-memory
+                    // state is correct, just skip the Tauri event.
+                    let state = BipState {
+                        mood,
+                        thought: thought.to_string(),
+                        at: chrono::Utc::now().to_rfc3339(),
+                        source: BipSource::Health,
+                    };
+                    if let Ok(mut g) = app.bip_state.try_write() {
+                        *g = state;
                     }
                 }
             }
@@ -305,6 +344,54 @@ async fn run_one_tick(
     }
 }
 
+/// Map a tick `Verdict` to the Bip mood + a one-sentence default thought
+/// that appears in the popover when the LLM doesn't write one. This is
+/// the bridge from "what the health agent decided" to "how Bip looks
+/// and what Bip says" — every tick ends with one of these.
+///
+/// See `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md` for the
+/// full rationale; in short: Bip is the visible face of the Health
+/// Agent. The Health Agent is hardcoded, periodic, ephemeral, and
+/// scoped to HealthMonitor only. Once a tick ends the personality
+/// "despawns" and the next tick starts fresh.
+#[allow(dead_code)] // public API; the live tick loop is wired in a follow-up
+pub fn verdict_to_bip(v: &Verdict) -> (BipMood, &'static str) {
+    match v {
+        Verdict::Ok => (BipMood::Idle, "Quiet on the wire."),
+        Verdict::Remediated => (BipMood::Success, "Nudged a stuck subagent back on track."),
+        Verdict::Escalate => (BipMood::Working, "One subagent is looping — checking in."),
+        Verdict::Error => (BipMood::Error, "Health check hit an error."),
+        Verdict::Timeout => (BipMood::Error, "Health check timed out."),
+    }
+}
+
+/// Update `AppState.bip_state` and broadcast the `bip-state` Tauri event
+/// so the WebView (and any future listener) sees the new mood + thought.
+///
+/// The lock is the source of truth; the event is the wake-up signal.
+/// On a held lock we skip the persist (the next tick will catch up)
+/// but still emit so a slow reader doesn't miss a beat.
+#[allow(dead_code)] // public API; the live tick loop is wired in a follow-up
+pub async fn emit_bip_update(
+    app: &AppState,
+    app_handle: &tauri::AppHandle,
+    mood: BipMood,
+    thought: &str,
+) {
+    let state = BipState {
+        mood,
+        thought: thought.to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+        source: BipSource::Health,
+    };
+    if let Ok(mut g) = app.bip_state.try_write() {
+        *g = state.clone();
+    }
+    if let Ok(payload) = serde_json::to_value(&state) {
+        let _ = app_handle.emit("bip-state", payload);
+    }
+}
+
 fn verdict_reason(v: &Verdict) -> String {
     match v {
         Verdict::Ok => "no action needed".into(),
@@ -335,12 +422,65 @@ mod tests {
             tick_interval_secs: 1,
             per_tick_max_ms: 1000,
         };
-        let agent = HealthAgent::start(cfg, router, auth, app, canvas_bus);
+        let agent = HealthAgent::start(cfg, router, auth, app, None, canvas_bus);
 
         // Wait long enough for one tick to fire and log.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let alerts = agent.recent_alerts(10);
         assert!(!alerts.is_empty(), "expected at least one tick alert");
         agent.shutdown();
+    }
+
+    #[test]
+    fn verdict_to_bip_maps_every_variant() {
+        // Every `Verdict` variant must produce a Bip mood — there's no
+        // default fallback. If a new variant is added, this test
+        // forces the mapping to be explicit.
+        assert_eq!(verdict_to_bip(&Verdict::Ok).0, BipMood::Idle);
+        assert_eq!(verdict_to_bip(&Verdict::Remediated).0, BipMood::Success);
+        assert_eq!(verdict_to_bip(&Verdict::Escalate).0, BipMood::Working);
+        assert_eq!(verdict_to_bip(&Verdict::Error).0, BipMood::Error);
+        assert_eq!(verdict_to_bip(&Verdict::Timeout).0, BipMood::Error);
+        // And every default thought must be non-empty (the popover
+        // shows it; a blank default is a UX bug).
+        for v in [
+            Verdict::Ok,
+            Verdict::Remediated,
+            Verdict::Escalate,
+            Verdict::Error,
+            Verdict::Timeout,
+        ] {
+            let (_, thought) = verdict_to_bip(&v);
+            assert!(!thought.is_empty(), "default thought for {:?} is empty", v);
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_updates_bip_state() {
+        // A live tick should write a new mood into the in-memory lock
+        // — the WebView can read it via `get_bip_state` on first mount.
+        let router = Arc::new(Router::new());
+        let auth: Arc<AuthState> = AuthState::new("boot".into());
+        let app = Arc::new(crate::commands::AppState::new(Arc::new(
+            crate::secrets::InMemoryStore::new(),
+        )));
+        let canvas_bus = CanvasEventBus::new();
+
+        // HeuristicCaller returns Ok → Bip should land on `Idle`.
+        let cfg = HealthConfig {
+            enabled: true,
+            model_id: None,
+            tick_interval_secs: 1,
+            per_tick_max_ms: 1000,
+        };
+        let agent = HealthAgent::start(cfg, router, auth, app.clone(), None, canvas_bus);
+
+        // Wait for at least one tick.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let snapshot = app.bip_state.read().await.clone();
+        agent.shutdown();
+        assert_eq!(snapshot.mood, BipMood::Idle);
+        assert_eq!(snapshot.source, BipSource::Health);
+        assert!(!snapshot.thought.is_empty());
     }
 }

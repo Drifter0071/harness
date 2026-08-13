@@ -34,12 +34,11 @@ impl SessionWatcher {
     /// the parent + filters on the basename).
     pub fn start(app: AppHandle, workspace: PathBuf) -> Result<Self, String> {
         let sessions_dir = workspace.join(".harness").join("sessions");
-        std::fs::create_dir_all(&sessions_dir)
-            .map_err(|e| format!("create sessions dir: {e}"))?;
+        std::fs::create_dir_all(&sessions_dir).map_err(|e| format!("create sessions dir: {e}"))?;
 
         let app_for_event = app.clone();
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else { return };
                 // Only forward Create + Modify(Data) on regular files.
                 // Modify(Name) (rename) and Remove are noise.
@@ -54,18 +53,14 @@ impl SessionWatcher {
                     if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
-                    eprintln!(
-                        "[hci:debug] session file changed: {}",
-                        path.display()
-                    );
+                    eprintln!("[hci:debug] session file changed: {}", path.display());
                     let _ = app_for_event.emit(
                         "session-file-changed",
                         json!({ "path": path.to_string_lossy() }),
                     );
                 }
-            },
-        )
-        .map_err(|e| format!("watcher init: {e}"))?;
+            })
+            .map_err(|e| format!("watcher init: {e}"))?;
 
         // Watch the parent so we catch new files too.
         let watch_target = sessions_dir.parent().unwrap_or(Path::new("."));
@@ -88,6 +83,9 @@ impl SessionWatcher {
             let _ = std::fs::create_dir_all(&probe_dir);
         });
 
-        Ok(Self { _watcher: watcher, stop_tx })
+        Ok(Self {
+            _watcher: watcher,
+            stop_tx,
+        })
     }
 }

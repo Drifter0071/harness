@@ -6,14 +6,23 @@
 
 use serde_json::{json, Value};
 
-use crate::hci::router::{MethodHandler, MethodTier, RpcContext, ConnectionCtx, RouterError};
+use crate::hci::router::{ConnectionCtx, MethodHandler, MethodTier, RouterError, RpcContext};
 
 pub struct PingHandler;
 #[async_trait::async_trait]
 impl MethodHandler for PingHandler {
-    fn name(&self) -> &'static str { "system.ping" }
-    fn tier(&self) -> MethodTier { MethodTier::Read }
-    async fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+    fn name(&self) -> &'static str {
+        "system.ping"
+    }
+    fn tier(&self) -> MethodTier {
+        MethodTier::Read
+    }
+    async fn handle(
+        &self,
+        _params: Value,
+        ctx: &RpcContext,
+        _conn: &ConnectionCtx,
+    ) -> Result<Value, RouterError> {
         Ok(json!({ "pong": true, "uptime_ms": ctx.elapsed_ms() }))
     }
 }
@@ -21,10 +30,23 @@ impl MethodHandler for PingHandler {
 pub struct InfoHandler;
 #[async_trait::async_trait]
 impl MethodHandler for InfoHandler {
-    fn name(&self) -> &'static str { "system.info" }
-    fn tier(&self) -> MethodTier { MethodTier::Read }
-    async fn handle(&self, _params: Value, ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
-        let channel = if cfg!(debug_assertions) { "debug" } else { "release" };
+    fn name(&self) -> &'static str {
+        "system.info"
+    }
+    fn tier(&self) -> MethodTier {
+        MethodTier::Read
+    }
+    async fn handle(
+        &self,
+        _params: Value,
+        ctx: &RpcContext,
+        _conn: &ConnectionCtx,
+    ) -> Result<Value, RouterError> {
+        let channel = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
         let platform = if cfg!(target_os = "windows") {
             "windows"
         } else if cfg!(target_os = "macos") {
@@ -60,26 +82,23 @@ pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Route
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::hci::auth::AuthState;
 
-    fn ctx() -> (Arc<AuthState>, RpcContext) {
-        let auth = AuthState::new("boot".into());
-        let _ = auth.consume_boot_token("boot").unwrap();
-        let ctx = RpcContext {
+    fn ctx() -> RpcContext {
+        RpcContext {
             writes_enabled: false,
-            auth: Some(auth.clone()),
+            auth: None,
             started_at: chrono::Utc::now(),
             app: None,
             canvas_bus: Some(crate::hci::CanvasEventBus::new()),
-        };
-        (auth, ctx)
+        }
     }
 
     #[tokio::test]
     async fn ping_returns_pong_and_uptime() {
-        let (_a, c) = ctx();
-        let conn = ConnectionCtx { session_token: "ignored".into() };
+        let c = ctx();
+        let conn = ConnectionCtx {
+            session_token: "loopback".into(),
+        };
         let r = PingHandler.handle(json!({}), &c, &conn).await.unwrap();
         assert_eq!(r["pong"], true);
         assert!(r["uptime_ms"].as_i64().is_some());
@@ -87,8 +106,10 @@ mod tests {
 
     #[tokio::test]
     async fn info_returns_expected_shape() {
-        let (_a, c) = ctx();
-        let conn = ConnectionCtx { session_token: "ignored".into() };
+        let c = ctx();
+        let conn = ConnectionCtx {
+            session_token: "loopback".into(),
+        };
         let r = InfoHandler.handle(json!({}), &c, &conn).await.unwrap();
         assert!(r["version"].is_string());
         assert!(r["platform"].is_string());

@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentMessage, AgentRole, AgentStatus};
 use crate::llm_client;
 use crate::models as models_mod;
 use crate::secrets::SecretStore;
+use crate::tools::BipState;
 
 // ============================= App State =============================
 
@@ -32,6 +33,12 @@ pub struct AppState {
     /// Active session file watcher. None until the frontend calls
     /// `watch_session` after opening a project.
     pub session_watcher: Arc<Mutex<Option<crate::session_watcher::SessionWatcher>>>,
+    /// Current Bip (mascot) state. The Health Agent drives this via the
+    /// `bip` tool; the frontend subscribes to the `bip-state` Tauri event
+    /// and may also call `get_bip_state` on first mount to seed itself
+    /// before the next event fires. See
+    /// `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
+    pub bip_state: Arc<RwLock<BipState>>,
 }
 
 impl AppState {
@@ -43,6 +50,7 @@ impl AppState {
             agent_in_flight: Arc::new(dashmap::DashMap::new()),
             pending_approvals: Arc::new(dashmap::DashMap::new()),
             session_watcher: Arc::new(Mutex::new(None)),
+            bip_state: Arc::new(RwLock::new(BipState::default())),
         }
     }
 }
@@ -404,6 +412,11 @@ pub async fn save_agent_roster(
 
 /// Kick off one agent turn for a session. Returns immediately; progress
 /// streams back through `agent-*` app events routed by `requestId`.
+///
+/// `reasoning_effort` is an optional hint carried over from the user's
+/// model prefs. It is forwarded to OpenAI-compat gateways as
+/// `reasoning_effort` so reasoning-capable models return
+/// `delta.reasoning_content` for the chain-of-thought display.
 #[tauri::command]
 pub async fn run_agent_turn(
     app: tauri::AppHandle,
@@ -415,6 +428,7 @@ pub async fn run_agent_turn(
     action_mode: crate::session::ActionMode,
     goal_mode: bool,
     workspace: String,
+    reasoning_effort: Option<crate::models::ReasoningEffort>,
 ) -> Result<(), String> {
     let session = crate::session::load_session(&workspace, &session_id)
         .await?
@@ -422,6 +436,11 @@ pub async fn run_agent_turn(
 
     let sink: Arc<dyn crate::agent_loop::AgentEventSink> =
         Arc::new(crate::agent_loop::AppEventSink::new(app));
+    // Wrap the sink so `bip-state` emissions also persist to AppState.
+    // This keeps a single source of truth (the lock) so a freshly
+    // connected WebView can seed itself via `get_bip_state`.
+    let sink: Arc<dyn crate::agent_loop::AgentEventSink> =
+        Arc::new(BipPersistingSink::new(sink, state.bip_state.clone()));
     let completer: Arc<dyn crate::agent_loop::TurnCompleter> = Arc::new(
         crate::agent_loop::LlmClientTurner::new(state.secrets.clone()),
     );
@@ -438,6 +457,7 @@ pub async fn run_agent_turn(
         state.pending_approvals.clone(),
         state.agent_in_flight.clone(),
         completer,
+        reasoning_effort,
     );
     Ok(())
 }
@@ -464,6 +484,20 @@ pub async fn cancel_agent(request_id: String, state: State<'_, AppState>) -> Res
         let _ = tx.send(true);
     }
     Ok(())
+}
+
+// ============================= Bip mascot state =============================
+//
+// The `bip` tool is the only way to mutate this state. It's gated on
+// `AgentRole::HealthMonitor` in `tools::tool_bip`. The frontend subscribes
+// to the `bip-state` Tauri event and may also call `get_bip_state` on first
+// mount to seed itself with the current value (avoids a flash of "idle"
+// before the first event of a session).
+
+/// Snapshot the current Bip state. The WebView calls this once on mount.
+#[tauri::command]
+pub async fn get_bip_state(state: State<'_, AppState>) -> Result<BipState, String> {
+    Ok(state.bip_state.read().await.clone())
 }
 
 #[tauri::command]
@@ -517,6 +551,35 @@ pub async fn save_saved_model(
     state: State<'_, AppState>,
 ) -> Result<models_mod::SavedModel, String> {
     models_mod::save_saved_model(&*state.secrets, model, api_key.as_deref()).await
+}
+
+/// Probe a saved model's capabilities (context window + reasoning
+/// support) by talking to the provider. Used by the "Probe" button
+/// in Settings. The result is NOT auto-saved; the frontend applies
+/// it to the editor draft and the user explicitly saves.
+#[tauri::command]
+pub async fn probe_saved_model(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<models_mod::CapabilityProbe, String> {
+    // Pull the persisted record to get base_url/format/model_name.
+    let list = models_mod::list_saved_models(&*state.secrets).await?;
+    let saved = list
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("model {id} not found"))?;
+    let api_key = state
+        .secrets
+        .get(&id)
+        .map_err(|e| format!("keyring error: {e}"))?
+        .unwrap_or_default();
+    crate::capabilities::probe_capabilities(
+        &saved.format,
+        &saved.base_url,
+        &saved.model_name,
+        &api_key,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -614,4 +677,42 @@ pub async fn cancel_chat(request_id: String, state: State<'_, AppState>) -> Resu
         let _ = tx.send(());
     }
     Ok(())
+}
+
+// ============================= Bip sink wrapper =============================
+//
+// `BipPersistingSink` is an `AgentEventSink` that delegates to a wrapped
+// sink (the production `AppEventSink` in `run_agent_turn`) and, on every
+// `bip-state` event, also writes the new state into `AppState.bip_state`.
+// This keeps a single source of truth (the in-memory lock) so the frontend
+// can `get_bip_state` on first mount instead of guessing the current
+// value from a possibly-stale event stream.
+
+pub struct BipPersistingSink {
+    inner: Arc<dyn crate::agent_loop::AgentEventSink>,
+    bip_state: Arc<RwLock<BipState>>,
+}
+
+impl BipPersistingSink {
+    pub fn new(
+        inner: Arc<dyn crate::agent_loop::AgentEventSink>,
+        bip_state: Arc<RwLock<BipState>>,
+    ) -> Self {
+        Self { inner, bip_state }
+    }
+}
+
+impl crate::agent_loop::AgentEventSink for BipPersistingSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        if event == "bip-state" {
+            if let Ok(state) = serde_json::from_value::<BipState>(payload.clone()) {
+                // Best-effort persist: if the lock is held by a slow reader
+                // we still bubble the event out (the next one will catch up).
+                if let Ok(mut guard) = self.bip_state.try_write() {
+                    *guard = state;
+                }
+            }
+        }
+        self.inner.emit(event, payload);
+    }
 }

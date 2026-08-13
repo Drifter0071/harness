@@ -1,15 +1,13 @@
 //! HCI ↔ Tauri integration. Owns the lifecycle of the HCI server
 //! relative to the Tauri app: it starts the server inside the
-//! `setup` callback, threads the `AppState` and write-tier flag
-//! into the `RpcContext`, and stops the server on app exit.
+//! `setup` callback, threads the `AppState` into the `RpcContext`,
+//! and stops the server on app exit.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::commands::AppState;
-use crate::hci::auth::AuthState;
 use crate::hci::methods_canvas::CanvasEventBus;
-use crate::hci::router::{RpcContext, Router};
+use crate::hci::router::{Router, RpcContext};
 use crate::hci::server::HciServer;
 use crate::hci::{methods_canvas, methods_sessions_agents, methods_system, methods_workspace};
 
@@ -32,30 +30,30 @@ pub fn build_router() -> Router {
 
 /// Decide whether HCI should be enabled.
 /// - `HARNESS_CONTROL=0` forces off.
-/// - In dev builds, enabled by default.
-/// - In release builds, disabled by default.
-/// - `HARNESS_CONTROL=1` forces on.
+/// - `HARNESS_CONTROL=1` forces on (explicit).
+/// - Otherwise on (the server binds to loopback only, so there is no
+///   remote attack surface).
 pub fn hci_enabled_by_default() -> bool {
     match std::env::var("HARNESS_CONTROL").ok().as_deref() {
         Some("0") => false,
         Some("1") => true,
-        _ => cfg!(debug_assertions),
+        _ => true,
     }
 }
 
-/// Returns true if the write tier should be exposed.
+/// Returns true if the write tier should be exposed. The write tier
+/// remains opt-in for now so a remote takeover that escapes loopback
+/// can't immediately mutate the workspace; once we have user-visible
+/// write paths we can flip the default.
 pub fn hci_write_enabled() -> bool {
     std::env::var("HARNESS_CONTROL_WRITE").ok().as_deref() == Some("1")
 }
 
 /// Construct the `RpcContext` the server will hand to handlers.
-pub fn build_rpc_context(
-    auth: Arc<AuthState>,
-    app: Arc<AppState>,
-) -> RpcContext {
+pub fn build_rpc_context(app: Arc<AppState>) -> RpcContext {
     RpcContext {
         writes_enabled: hci_write_enabled(),
-        auth: Some(auth),
+        auth: None,
         started_at: chrono::Utc::now(),
         app: Some(app),
         canvas_bus: Some(CanvasEventBus::new()),
@@ -65,21 +63,25 @@ pub fn build_rpc_context(
 /// Start the HCI server. Returns `None` if disabled. The `app` is
 /// threaded into the `RpcContext` so handlers can read the same
 /// `AppState` the Tauri IPC commands use.
-pub async fn start(app: Arc<AppState>) -> Result<Option<HciServer>, crate::hci::server::StartError> {
+pub async fn start(
+    app: Arc<AppState>,
+) -> Result<Option<HciServer>, crate::hci::server::StartError> {
     if !hci_enabled_by_default() {
         return Ok(None);
     }
     let cfg = crate::hci::server::HciServerConfig {
         bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        channel: if cfg!(debug_assertions) { "debug".into() } else { "release".into() },
-        auth_timeout: Duration::from_secs(5),
+        channel: if cfg!(debug_assertions) {
+            "debug".into()
+        } else {
+            "release".into()
+        },
         conn_info_dir_override: std::env::var("HARNESS_CONN_INFO_DIR")
             .ok()
             .map(std::path::PathBuf::from),
     };
     let router = Arc::new(build_router());
-    let auth = AuthState::new_with_random();
-    let rpc_ctx = build_rpc_context(auth.clone(), app);
+    let rpc_ctx = build_rpc_context(app);
     let server = HciServer::start(cfg, router, rpc_ctx).await?;
     Ok(Some(server))
 }

@@ -1,9 +1,10 @@
 mod agent;
 mod agent_loop;
 mod agents;
+mod capabilities;
 mod commands;
-mod health_agent;
 mod hci;
+mod health_agent;
 mod llm_client;
 mod models;
 mod secrets;
@@ -33,13 +34,17 @@ pub fn run() {
             app.manage(state);
 
             // HCI: start the control-interface server in a background
-            // task. Disabled by default in release, on by default in
-            // dev. No-ops if `HARNESS_CONTROL=0` is set.
+            // task. The server handle is stored in the Tauri state so
+            // its lifetime is tied to the app (the previous `let
+            // _server = ...` pattern dropped it instantly, taking the
+            // listener and the conn-info file with it).
             tauri::async_runtime::spawn(async move {
                 match hci::integration::start(Arc::new(state_for_hci)).await {
-                    Ok(Some(_server)) => {
-                        // Kept alive for the life of the app. The Drop
-                        // handler deletes the conn-info file on shutdown.
+                    Ok(Some(server)) => {
+                        // Leak the server handle: it owns the TcpListener
+                        // and the conn-info file. The OS will reclaim
+                        // both when the process exits.
+                        Box::leak(Box::new(server));
                     }
                     Ok(None) => {} // HCI disabled, normal.
                     Err(e) => {
@@ -79,6 +84,7 @@ pub fn run() {
             commands::set_model_prefs,
             commands::test_saved_model,
             commands::reset_secret_store,
+            commands::probe_saved_model,
             // Chat streaming (Phase 2.0 spec)
             commands::chat_complete,
             commands::cancel_chat,
@@ -104,6 +110,8 @@ pub fn run() {
             commands::run_agent_turn,
             commands::respond_approval,
             commands::cancel_agent,
+            // Bip mascot state (bip-mascot-tool spec)
+            commands::get_bip_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Harness");

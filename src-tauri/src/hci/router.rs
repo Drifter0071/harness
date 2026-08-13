@@ -24,8 +24,9 @@ use crate::commands::AppState;
 use crate::hci::auth::AuthState;
 use crate::hci::methods_canvas::CanvasEventBus;
 
-/// The two custom JSON-RPC error codes the spec introduces on top of
-/// the standard set.
+/// The custom JSON-RPC error codes the spec introduces on top of
+/// the standard set. (`ERR_AUTH_REQUIRED` is kept for legacy clients
+/// that may still expect it; the server no longer emits it.)
 pub const ERR_WRITE_DISABLED: i32 = -32001;
 pub const ERR_AUTH_REQUIRED: i32 = -32002;
 
@@ -182,7 +183,9 @@ pub struct Router {
 
 impl Router {
     pub fn new() -> Self {
-        Self { handlers: Vec::new() }
+        Self {
+            handlers: Vec::new(),
+        }
     }
 
     pub fn register(mut self, h: impl MethodHandler + 'static) -> Self {
@@ -196,7 +199,10 @@ impl Router {
 
     /// Look up a handler by name.
     pub fn get(&self, name: &str) -> Option<&dyn MethodHandler> {
-        self.handlers.iter().find(|h| h.name() == name).map(|h| h.as_ref())
+        self.handlers
+            .iter()
+            .find(|h| h.name() == name)
+            .map(|h| h.as_ref())
     }
 
     pub fn methods(&self) -> impl Iterator<Item = &'static str> + '_ {
@@ -212,23 +218,18 @@ impl Router {
         ctx: &RpcContext,
         conn: &ConnectionCtx,
     ) -> Option<RpcResponse> {
-        let id = req.id.clone().unwrap_or(Value::Null);
-
         // JSON-RPC notifications: no `id` field → no response on the
         // wire. Per spec, even an error must not produce a response.
         if req.is_notification() {
-            // Still run the handler (or auth gate) so the call has
-            // observable side effects, but swallow the result.
+            // Still run the handler so the call has observable side
+            // effects, but swallow the result.
             let _ = self.dispatch(&req, ctx, conn).await;
             return None;
         }
 
-        // Auth gate: every method except `auth` requires a valid session.
-        if let Some(auth) = &ctx.auth {
-            if req.method != "auth" && !auth.is_valid_session(&conn.session_token) {
-                return Some(RpcResponse::err(id, ERR_AUTH_REQUIRED, "auth required"));
-            }
-        }
+        // No auth gate. The TCP listener binds to loopback only, so
+        // access control is "did you run on this machine" — sufficient
+        // for a dev control interface.
 
         self.dispatch(&req, ctx, conn).await
     }
@@ -287,9 +288,18 @@ mod tests {
     struct EchoHandler;
     #[async_trait::async_trait]
     impl MethodHandler for EchoHandler {
-        fn name(&self) -> &'static str { "echo" }
-        fn tier(&self) -> MethodTier { MethodTier::Read }
-        async fn handle(&self, params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        fn tier(&self) -> MethodTier {
+            MethodTier::Read
+        }
+        async fn handle(
+            &self,
+            params: Value,
+            _ctx: &RpcContext,
+            _conn: &ConnectionCtx,
+        ) -> Result<Value, RouterError> {
             Ok(params)
         }
     }
@@ -297,43 +307,45 @@ mod tests {
     struct WriteHandler;
     #[async_trait::async_trait]
     impl MethodHandler for WriteHandler {
-        fn name(&self) -> &'static str { "do.write" }
-        fn tier(&self) -> MethodTier { MethodTier::Write }
-        async fn handle(&self, _params: Value, _ctx: &RpcContext, _conn: &ConnectionCtx) -> Result<Value, RouterError> {
+        fn name(&self) -> &'static str {
+            "do.write"
+        }
+        fn tier(&self) -> MethodTier {
+            MethodTier::Write
+        }
+        async fn handle(
+            &self,
+            _params: Value,
+            _ctx: &RpcContext,
+            _conn: &ConnectionCtx,
+        ) -> Result<Value, RouterError> {
             Ok(Value::String("wrote".into()))
         }
     }
 
-    fn make_ctx(writes: bool) -> (Arc<AuthState>, RpcContext) {
-        let auth = AuthState::new("boot".into());
-        // Pre-authenticate a session token.
-        let _ = auth.consume_boot_token("boot").unwrap();
-        let ctx = RpcContext {
+    fn make_ctx(writes: bool) -> RpcContext {
+        RpcContext {
             writes_enabled: writes,
-            auth: Some(auth.clone()),
+            auth: None,
             started_at: chrono::Utc::now(),
             app: None,
             canvas_bus: None,
-        };
-        (auth, ctx)
+        }
+    }
+
+    fn loopback_conn() -> ConnectionCtx {
+        ConnectionCtx {
+            session_token: "loopback".into(),
+        }
     }
 
     #[tokio::test]
     async fn read_method_dispatches() {
-        let (_auth, ctx) = make_ctx(false);
-        // `make_ctx` already consumed the boot token and minted a
-        // session. We can't recover that session from outside (the
-        // session token isn't returned by make_ctx), so for this test
-        // we just call rotate() to get a fresh boot token, then
-        // consume it for a fresh session.
-        let new_boot = ctx.auth.as_ref().unwrap().rotate();
-        let session = ctx.auth.as_ref().unwrap().consume_boot_token(&new_boot).unwrap();
-        let conn = ConnectionCtx { session_token: session };
-
+        let ctx = make_ctx(false);
+        let conn = loopback_conn();
         let router = Router::new().register(EchoHandler);
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"id":1,"method":"echo","params":{"x":42}}"#,
-        ).unwrap();
+        let req: RpcRequest =
+            serde_json::from_str(r#"{"id":1,"method":"echo","params":{"x":42}}"#).unwrap();
         let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["x"], 42);
@@ -341,103 +353,42 @@ mod tests {
 
     #[tokio::test]
     async fn write_method_blocked_when_disabled() {
-        let (_auth, _ctx) = make_ctx(false);
-        let auth = AuthState::new("boot2".into());
-        let session = auth.consume_boot_token("boot2").unwrap();
-        let ctx = RpcContext {
-            writes_enabled: false,
-            auth: Some(auth),
-            started_at: chrono::Utc::now(),
-            app: None,
-            canvas_bus: None,
-        };
-        let conn = ConnectionCtx { session_token: session };
-
+        let ctx = make_ctx(false);
+        let conn = loopback_conn();
         let router = Router::new().register(WriteHandler);
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"id":"a","method":"do.write","params":{}}"#,
-        ).unwrap();
+        let req: RpcRequest =
+            serde_json::from_str(r#"{"id":"a","method":"do.write","params":{}}"#).unwrap();
         let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.error.unwrap().code, ERR_WRITE_DISABLED);
     }
 
     #[tokio::test]
     async fn write_method_succeeds_when_enabled() {
-        let auth = AuthState::new("boot3".into());
-        let session = auth.consume_boot_token("boot3").unwrap();
-        let ctx = RpcContext {
-            writes_enabled: true,
-            auth: Some(auth),
-            started_at: chrono::Utc::now(),
-            app: None,
-            canvas_bus: None,
-        };
-        let conn = ConnectionCtx { session_token: session };
-
+        let ctx = make_ctx(true);
+        let conn = loopback_conn();
         let router = Router::new().register(WriteHandler);
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"id":"a","method":"do.write","params":{}}"#,
-        ).unwrap();
+        let req: RpcRequest =
+            serde_json::from_str(r#"{"id":"a","method":"do.write","params":{}}"#).unwrap();
         let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.result.unwrap(), Value::String("wrote".into()));
     }
 
     #[tokio::test]
     async fn unknown_method_returns_32601() {
-        let auth = AuthState::new("boot4".into());
-        let session = auth.consume_boot_token("boot4").unwrap();
-        let ctx = RpcContext {
-            writes_enabled: true,
-            auth: Some(auth),
-            started_at: chrono::Utc::now(),
-            app: None,
-            canvas_bus: None,
-        };
-        let conn = ConnectionCtx { session_token: session };
+        let ctx = make_ctx(true);
+        let conn = loopback_conn();
         let router = Router::new();
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"id":1,"method":"nope"}"#,
-        ).unwrap();
+        let req: RpcRequest = serde_json::from_str(r#"{"id":1,"method":"nope"}"#).unwrap();
         let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
         assert_eq!(resp.error.unwrap().code, -32601);
     }
 
     #[tokio::test]
-    async fn invalid_session_returns_auth_required() {
-        let auth = AuthState::new("boot5".into());
-        let _ = auth.consume_boot_token("boot5").unwrap();
-        let ctx = RpcContext {
-            writes_enabled: true,
-            auth: Some(auth),
-            started_at: chrono::Utc::now(),
-            app: None,
-            canvas_bus: None,
-        };
-        let conn = ConnectionCtx { session_token: "wrong".into() };
-        let router = Router::new().register(EchoHandler);
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"id":1,"method":"echo","params":{}}"#,
-        ).unwrap();
-        let resp = router.handle_request(req, &ctx, &conn).await.unwrap();
-        assert_eq!(resp.error.unwrap().code, ERR_AUTH_REQUIRED);
-    }
-
-    #[tokio::test]
     async fn notification_returns_none() {
-        let auth = AuthState::new("boot6".into());
-        let session = auth.consume_boot_token("boot6").unwrap();
-        let ctx = RpcContext {
-            writes_enabled: true,
-            auth: Some(auth),
-            started_at: chrono::Utc::now(),
-            app: None,
-            canvas_bus: None,
-        };
-        let conn = ConnectionCtx { session_token: session };
+        let ctx = make_ctx(true);
+        let conn = loopback_conn();
         let router = Router::new().register(EchoHandler);
-        let req: RpcRequest = serde_json::from_str(
-            r#"{"method":"echo","params":{}}"#,
-        ).unwrap();
+        let req: RpcRequest = serde_json::from_str(r#"{"method":"echo","params":{}}"#).unwrap();
         let resp = router.handle_request(req, &ctx, &conn).await;
         assert!(resp.is_none());
     }

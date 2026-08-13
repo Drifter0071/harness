@@ -68,7 +68,9 @@ pub fn build_conn_info(addr: std::net::IpAddr, port: u16, channel: &str) -> Conn
         boot_token,
         started_at: chrono::Utc::now().to_rfc3339(),
         build: BuildInfo {
-            git_sha: option_env!("HARNESS_GIT_SHA").unwrap_or("unknown").to_string(),
+            git_sha: option_env!("HARNESS_GIT_SHA")
+                .unwrap_or("unknown")
+                .to_string(),
             channel: channel.to_string(),
         },
     }
@@ -171,7 +173,10 @@ mod tests {
         assert_eq!(info.build.channel, "test");
         // 32 bytes base64-URL-safe-no-pad = 43 chars
         assert_eq!(info.boot_token.len(), 43);
-        assert!(info.boot_token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(info
+            .boot_token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
@@ -36,6 +37,11 @@ pub struct Message {
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Chain-of-thought captured for thinking-capable models.
+    /// `None` (or absent) on plain chat turns. The frontend renders
+    /// this in a collapsible "Thinking" block above the message body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Per-session token telemetry (spec §4.5). `null` until the first
@@ -84,6 +90,15 @@ pub struct ToolActivity {
     pub status: ToolActivityStatus,
     /// ISO 8601 UTC string.
     pub timestamp: String,
+    /// `requestId` of the agent turn that ran this tool. Lets the
+    /// frontend attach tool calls to the right assistant message
+    /// (`agent-<requestId>`) so they render inline in the chat and
+    /// survive a reload. `None` for non-tool records (e.g. turn errors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Raw JSON arguments of the call, for display in the chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
 }
 
 /// Snapshot of the agent personality that drives a session. Persisted so
@@ -96,6 +111,25 @@ pub struct AgentSnapshot {
     pub name: String,
     pub role: AgentRole,
     pub system_prompt: String,
+}
+
+/// In-band "this turn finished" marker written by the agent loop on the
+/// final persist, right before the terminal event. The frontend uses it as
+/// a disk-based completion signal when streaming events don't reach the
+/// WebView, so responses still appear without a manual refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTurn {
+    pub request_id: String,
+    /// `"done"` or `"error"`.
+    pub status: String,
+    pub at: String,
+    /// Final reasoning captured for the turn, if any. Mirrored on the
+    /// session file so the file-watcher fallback (the one that fixes
+    /// "responses only show after refresh") can apply it when the
+    /// streaming events never reach the WebView.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Session wire format v2 — one self-contained file per session under
@@ -125,6 +159,9 @@ pub struct Session {
     pub activities: Vec<ToolActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_stats: Option<TokenStats>,
+    /// Completed-turn marker from the agent loop (see [`LastTurn`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn: Option<LastTurn>,
 }
 
 fn default_version() -> u32 {
@@ -374,6 +411,7 @@ pub async fn create_session(
         messages: Vec::new(),
         activities: Vec::new(),
         token_stats: None,
+        last_turn: None,
     };
     write_session_atomic(&dir, &session).await?;
     set_active_session(project_path, &id).await?;
@@ -586,6 +624,7 @@ pub async fn migrate_v1_if_needed(project_path: &str) -> Result<Option<String>, 
         messages: v1.messages,
         activities: Vec::new(),
         token_stats: v1.token_stats,
+        last_turn: None,
     };
     derive_title(&mut session);
     let dir = ensure_sessions_dir(project_path).await?;
@@ -788,6 +827,7 @@ mod tests {
                 mentions: vec![],
                 agent_id: None,
                 agent_name: None,
+                reasoning: None,
             }],
             activities: vec![ToolActivity {
                 id: "act1".into(),
@@ -795,6 +835,8 @@ mod tests {
                 summary: "read src/main.rs".into(),
                 status: ToolActivityStatus::Ran,
                 timestamp: iso_now(),
+                request_id: Some("req-1".into()),
+                arguments: Some(serde_json::json!({ "path": "src/main.rs" })),
             }],
             token_stats: Some(TokenStats {
                 last_in: 10,
@@ -804,6 +846,7 @@ mod tests {
                 session_window_used: Some(0.23),
                 session_window_resets_at: Some("2026-08-12T00:00:00Z".into()),
             }),
+            last_turn: None,
         }
     }
 

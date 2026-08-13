@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use crate::hci::router::{ConnectionCtx, MethodHandler, MethodTier, RpcContext, RouterError};
+use crate::hci::router::{ConnectionCtx, MethodHandler, MethodTier, RouterError, RpcContext};
 
 /// In-process broadcast bus for canvas events. The Tauri-side emitter
 /// pushes; the per-connection task tails via `events.subscribe`.
@@ -32,7 +32,9 @@ impl Default for CanvasEventBus {
 impl CanvasEventBus {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(64);
-        Self { inner: Arc::new(tx) }
+        Self {
+            inner: Arc::new(tx),
+        }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.inner.subscribe()
@@ -47,8 +49,12 @@ impl CanvasEventBus {
 pub struct SnapshotHandler;
 #[async_trait::async_trait]
 impl MethodHandler for SnapshotHandler {
-    fn name(&self) -> &'static str { "canvas.snapshot" }
-    fn tier(&self) -> MethodTier { MethodTier::Read }
+    fn name(&self) -> &'static str {
+        "canvas.snapshot"
+    }
+    fn tier(&self) -> MethodTier {
+        MethodTier::Read
+    }
     async fn handle(
         &self,
         _params: Value,
@@ -68,8 +74,12 @@ impl MethodHandler for SnapshotHandler {
 pub struct SubscribeHandler;
 #[async_trait::async_trait]
 impl MethodHandler for SubscribeHandler {
-    fn name(&self) -> &'static str { "events.subscribe" }
-    fn tier(&self) -> MethodTier { MethodTier::Read }
+    fn name(&self) -> &'static str {
+        "events.subscribe"
+    }
+    fn tier(&self) -> MethodTier {
+        MethodTier::Read
+    }
     async fn handle(
         &self,
         _params: Value,

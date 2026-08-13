@@ -16,8 +16,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use rand::RngCore;
 use base64::Engine;
+use rand::RngCore;
 
 /// Random, opaque session-token identifier. Same shape as `boot_token`
 /// (256 bits, base64-URL-safe-no-pad) so the on-the-wire treatment is
@@ -76,7 +76,9 @@ impl AuthState {
 
     /// Returns true if the presented session token is currently live.
     pub fn is_valid_session(&self, presented: &str) -> bool {
-        let Ok(g) = self.inner.lock() else { return false };
+        let Ok(g) = self.inner.lock() else {
+            return false;
+        };
         g.sessions.contains(presented)
     }
 
@@ -113,7 +115,9 @@ mod tests {
     fn boot_token_consumes_and_issues_session() {
         let boot = fresh_token();
         let state = AuthState::new(boot.clone());
-        let session = state.consume_boot_token(&boot).expect("first auth succeeds");
+        let session = state
+            .consume_boot_token(&boot)
+            .expect("first auth succeeds");
         assert!(state.is_valid_session(&session));
         // Boot token is now consumed.
         assert!(state.consume_boot_token(&boot).is_none());
