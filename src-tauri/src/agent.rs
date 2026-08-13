@@ -1,7 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+/// The system prompt for the chat agent. The chat agent is always the
+/// Orchestrator — it's the "front of the work" agent the user talks to,
+/// and it delegates to subagent personalities (Coder, Architect,
+/// Researcher, HealthMonitor) from the global personalities roster.
+///
+/// Kept as a const so the prompt is code-side (not user-editable) and
+/// version-controlled. A future multi-agent loop will likely expand
+/// this; the constant lives here next to the role enum so all
+/// role-derived prompts are in one place.
+pub const ORCHESTRATOR_PROMPT: &str = "\
+You are the Orchestrator — the primary agent the user talks to in this app. \
+You are a senior technical lead with full context over the active workspace: \
+you can read files, run commands, edit code, and use the other tools available to you. \
+You answer questions, do the work, and synthesize results. \
+Subagent personalities (Coder, Architect, Researcher, HealthMonitor) live in the Agent Manager \
+and represent the kinds of focused work you might pull in, but you yourself handle the conversation directly. \
+Be direct, specific, and useful. Show your work in the chat. When a task is complete, stop.";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentRole {
+    /// The chat agent. Always present, never a user-editable personality
+    /// in the global roster. The session runs as the Orchestrator; the
+    /// orchestrator prompt is a code constant (see `ORCHESTRATOR_PROMPT`).
     Orchestrator,
     Coder,
     Architect,
@@ -12,7 +33,7 @@ pub enum AgentRole {
 impl AgentRole {
     pub fn default_prompt(&self) -> &str {
         match self {
-            AgentRole::Orchestrator => "You are the orchestrator. You coordinate sub-agents, break down goals into tasks, and synthesize results.",
+            AgentRole::Orchestrator => ORCHESTRATOR_PROMPT,
             AgentRole::Coder => "You are a senior software engineer. You write clean, efficient code and follow best practices.",
             AgentRole::Architect => "You are a system architect. You design systems, evaluate trade-offs, and create technical specifications.",
             AgentRole::Researcher => "You are a technical researcher. You gather information, analyze options, and provide well-sourced recommendations.",
@@ -31,6 +52,28 @@ impl AgentRole {
             AgentRole::Researcher,
             AgentRole::HealthMonitor,
         ]
+    }
+
+    /// Roles that can back a user-editable personality in the global
+    /// roster. The Orchestrator is the chat agent and is NOT a
+    /// personality — it's hardcoded into the app. The other four are
+    /// subagent roles the user can rename, re-prompt, and bind to saved
+    /// models.
+    pub fn subagent_roles() -> [AgentRole; 4] {
+        [
+            AgentRole::Coder,
+            AgentRole::Architect,
+            AgentRole::Researcher,
+            AgentRole::HealthMonitor,
+        ]
+    }
+
+    /// Is this role exposed to the user as a subagent personality? The
+    /// Orchestrator returns `false`; the four subagent roles return
+    /// `true`. Used by the AgentManager UI and the personalities
+    /// roster's `enforce_invariants` to filter the default seed set.
+    pub fn is_subagent(&self) -> bool {
+        !matches!(self, AgentRole::Orchestrator)
     }
 
     /// Default display name for a builtin personality carrying this
@@ -85,7 +128,7 @@ impl Agent {
         Self {
             id: id.to_string(),
             name: name.to_string(),
-            role: role.clone(),
+            role: role,
             system_prompt: if system_prompt.is_empty() {
                 role.default_prompt().to_string()
             } else {

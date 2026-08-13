@@ -1,19 +1,21 @@
-// Agent Manager — global personality editor.
+// Agent Manager — global subagent personality editor.
 //
 // The roster lives at <data_dir>/Harness/personalities.json (shared
 // across every project the user opens) and is loaded once on app
 // mount. The editor lets the user:
 //
 //   - rename a personality (free text)
-//   - pick a role from the five `AgentRole` values
+//   - pick a role from the four subagent roles
 //   - pick a saved model from the Settings → Models list
 //     (or "Use chat model" for the default)
 //   - edit the system prompt, with a one-click "Reset to default"
 //     that re-applies the role's seed prompt (the role's standard
 //     prompt)
 //
-// Builtin personalities (one per `AgentRole`) are seeded on first
-// contact and are editable but cannot be deleted.
+// The Orchestrator is NOT in the roster — it's the chat agent, with
+// a hardcoded prompt in `src-tauri/src/agent.rs::ORCHESTRATOR_PROMPT`.
+// Builtin subagent personalities (one per subagent role) are seeded
+// on first contact and are editable but cannot be deleted.
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useStore } from "../lib/store";
@@ -27,8 +29,11 @@ import {
 import { X, Plus, Trash2, Bot, RotateCcw } from "lucide-react";
 import { showToast } from "../lib/toast";
 
-const ROLES: AgentRole[] = [
-  "Orchestrator",
+/** Roles exposed as user-editable subagent personalities. The
+ *  Orchestrator is the chat agent and is never a personality. */
+type SubagentRole = Exclude<AgentRole, "Orchestrator">;
+
+const ROLES: SubagentRole[] = [
   "Coder",
   "Architect",
   "Researcher",
@@ -99,7 +104,7 @@ export function AgentManager() {
       if (removed.id === defaultPersonalityId && next.length > 0) {
         defaultPersonalityId = next[0].id;
       }
-      return { personalities: next, defaultPersonalityId };
+      return { ...d, personalities: next, defaultPersonalityId };
     });
   };
 
@@ -107,7 +112,7 @@ export function AgentManager() {
     setDraft((d) => (d ? { ...d, defaultPersonalityId: id } : d));
   };
 
-  const handleRoleChange = (index: number, role: AgentRole) => {
+  const handleRoleChange = (index: number, role: SubagentRole) => {
     setDraft((d) => {
       if (!d) return d;
       const personalities = d.personalities.map((p, i) => {
@@ -130,7 +135,12 @@ export function AgentManager() {
   const handleResetPrompt = (index: number) => {
     const p = draft?.personalities[index];
     if (!p) return;
-    updatePersonality(index, { systemPrompt: DEFAULT_PROMPTS[p.role] });
+    // p.role is one of the four subagent roles by construction — the
+    // role <select> only offers those. `DEFAULT_PROMPTS` is keyed by
+    // subagent roles, so the cast is sound.
+    updatePersonality(index, {
+      systemPrompt: DEFAULT_PROMPTS[p.role as SubagentRole],
+    });
   };
 
   const handleSave = async () => {
@@ -157,7 +167,7 @@ export function AgentManager() {
             Agent Manager
           </span>
           <span className="text-[11px] text-white-15 ml-auto">
-            {draft?.personalities.length ?? 0} personalities · global
+            {draft?.personalities.length ?? 0} subagent personalities · global
           </span>
           <button
             onClick={() => setOpen(false)}
@@ -232,15 +242,16 @@ function PersonalityRow({
   isDefault: boolean;
   savedModels: { id: string; label: string; modelName: string }[];
   onChange: (patch: Partial<AgentPersonality>) => void;
-  onRoleChange: (role: AgentRole) => void;
+  onRoleChange: (role: SubagentRole) => void;
   onResetPrompt: () => void;
   onRemove: () => void;
   onSetDefault: () => void;
 }) {
   // Is the prompt identical to the role's default? If so, hide the
   // reset link (no-op) — the "Reset to default" button is only useful
-  // once the user has actually edited the prompt.
-  const defaultPrompt = DEFAULT_PROMPTS[personality.role];
+  // once the user has actually edited the prompt. The cast is sound
+  // because the row's role <select> only offers subagent roles.
+  const defaultPrompt = DEFAULT_PROMPTS[personality.role as SubagentRole];
   const isAtDefault = useMemo(
     () => personality.systemPrompt === defaultPrompt,
     [personality.systemPrompt, defaultPrompt],
@@ -258,7 +269,7 @@ function PersonalityRow({
         />
         <select
           value={personality.role}
-          onChange={(e) => onRoleChange(e.target.value as AgentRole)}
+          onChange={(e) => onRoleChange(e.target.value as SubagentRole)}
           className="bg-surface-3 border border-border-subtle rounded px-2 py-1 text-[11px] text-white outline-none cursor-pointer"
           aria-label="Role"
         >

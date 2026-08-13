@@ -4,23 +4,23 @@
 //! shared across every project the user opens. Each personality carries:
 //!
 //! - a custom display name (e.g. "Bip", "Senior Coder")
-//! - a role (one of `AgentRole`)
+//! - a role (one of the four subagent roles from `AgentRole`)
 //! - a system prompt (editable; defaults to `AgentRole::default_prompt`)
 //! - a saved-model id (the `SavedModel` to use when the personality runs;
 //!   `None` means "fall back to the active chat model")
 //!
-//! Builtin personalities are seeded on first contact: one per `AgentRole`
-//! (Orchestrator, Coder, Architect, Researcher, HealthMonitor), each with
-//! a stable id and the role's default prompt. Builtins are editable but
-//! cannot be deleted; that's enforced at save time so a stray frontend
-//! payload can't drop them.
+//! Builtin personalities are seeded on first contact: one per subagent
+//! role (Coder, Architect, Researcher, HealthMonitor), each with a
+//! stable id and the role's default prompt. The **Orchestrator** is NOT
+//! in the roster — it's the hardcoded chat agent the user talks to
+//! directly. Builtin subagents are editable but cannot be deleted;
+//! that's enforced at save time so a stray frontend payload can't drop
+//! them.
 //!
-//! Personality resolution lives in `commands::resolve_personality` (or a
-//! similar helper) — when a session starts, we look up the personality by
-//! id, snapshot it onto the session's `AgentSnapshot`, and the agent
-//! loop uses the snapshotted values. Editing a personality retroactively
-//! affects future session starts (old sessions keep the snapshot they
-//! were started with — see the `AgentSnapshot` doc).
+//! Future direction: the orchestrator loop will read this roster live
+//! to dispatch subagents. For v0 the roster exists so the user can
+//! rename / re-prompt / bind models to each subagent persona ahead of
+//! dispatch being wired up.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -32,14 +32,21 @@ const ROSTER_VERSION: u32 = 2;
 const MIN_PERSONALITIES: usize = 1;
 const BUILTIN_PREFIX: &str = "builtin-";
 
-/// Builtin personality id for a given role. Stable across versions.
+/// Builtin personality id for a given subagent role. Stable across
+/// versions. The Orchestrator role is NOT valid here — it's the chat
+/// agent and has no roster row.
 pub fn builtin_personality_id(role: AgentRole) -> String {
+    assert!(
+        role.is_subagent(),
+        "builtin_personality_id called for non-subagent role {:?}",
+        role
+    );
     let slug = match role {
-        AgentRole::Orchestrator => "orchestrator",
         AgentRole::Coder => "coder",
         AgentRole::Architect => "architect",
         AgentRole::Researcher => "researcher",
         AgentRole::HealthMonitor => "health-monitor",
+        AgentRole::Orchestrator => unreachable!("guarded by assert above"),
     };
     format!("{BUILTIN_PREFIX}{slug}")
 }
@@ -64,14 +71,19 @@ pub struct AgentPersonality {
 #[serde(rename_all = "camelCase")]
 pub struct PersonalityRoster {
     pub version: u32,
-    /// Stable id of the personality that new sessions default to.
-    /// Repaired on save if it points at a missing personality.
+    /// Stable id of the personality that the Agent Manager treats as
+    /// the default. The chat agent itself (the Orchestrator) is not
+    /// in the roster, so this is the default for the Agent Manager
+    /// UX, not for sessions. Repaired on save if it points at a
+    /// missing personality.
     pub default_personality_id: String,
     pub personalities: Vec<AgentPersonality>,
 }
 
 fn default_personalities() -> Vec<AgentPersonality> {
-    AgentRole::all()
+    // Only subagent roles — the Orchestrator is the chat agent and is
+    // not a user-editable personality.
+    AgentRole::subagent_roles()
         .iter()
         .map(|&role| AgentPersonality {
             id: builtin_personality_id(role),
@@ -262,29 +274,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_roster_seeds_all_five_roles() {
+    async fn default_roster_seeds_all_four_subagent_roles() {
         let _g = DataDirGuard::new();
         let roster = load_personalities().await.unwrap();
         assert_eq!(roster.version, 2);
-        assert!(roster
-            .personalities
-            .iter()
-            .all(|p| p.builtin && p.role != AgentRole::Orchestrator || p.builtin));
-        // Every role is present.
-        for role in AgentRole::all() {
+        // Every subagent role is present.
+        for role in AgentRole::subagent_roles() {
             assert!(
                 roster.personalities.iter().any(|p| p.role == role),
                 "default roster missing {:?}",
                 role
             );
         }
-        // Default points at the orchestrator builtin.
+        // The Orchestrator is NOT in the roster — it's the chat agent.
+        assert!(
+            !roster
+                .personalities
+                .iter()
+                .any(|p| p.role == AgentRole::Orchestrator),
+            "Orchestrator must not be in the roster"
+        );
+        // Default points at the Coder builtin (the first subagent).
         assert_eq!(
             roster.default_personality_id,
-            builtin_personality_id(AgentRole::Orchestrator)
+            builtin_personality_id(AgentRole::Coder)
         );
         // The file landed somewhere (env-overridden or real data_dir).
         assert!(overridden_path().unwrap().exists() || personalities_path().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn orchestrator_role_is_rejected_from_builtin_id() {
+        // Defensive: the Orchestrator must never get a roster id.
+        let result = std::panic::catch_unwind(|| {
+            builtin_personality_id(AgentRole::Orchestrator)
+        });
+        assert!(result.is_err(), "expected panic for non-subagent role");
     }
 
     #[tokio::test]
@@ -301,7 +326,7 @@ mod tests {
         });
         roster.default_personality_id = "user-coder".into();
         let saved = save_personalities(&roster).await.unwrap();
-        assert_eq!(saved.personalities.len(), 6); // 5 builtins + 1 user
+        assert_eq!(saved.personalities.len(), 5); // 4 builtins + 1 user
         let user = saved
             .personalities
             .iter()
@@ -381,15 +406,16 @@ mod tests {
             .position(|p| p.role == AgentRole::Coder)
             .unwrap();
         roster.personalities[coder].name = "Coder (custom)".into();
-        // Drop the orchestrator builtin.
+        // Drop a subagent builtin (HealthMonitor in this case) from the
+        // payload. `enforce_invariants` re-inserts it.
         roster
             .personalities
-            .retain(|p| p.role != AgentRole::Orchestrator);
+            .retain(|p| p.role != AgentRole::HealthMonitor);
         let saved = save_personalities(&roster).await.unwrap();
         assert!(saved
             .personalities
             .iter()
-            .any(|p| p.role == AgentRole::Orchestrator && p.builtin));
+            .any(|p| p.role == AgentRole::HealthMonitor && p.builtin));
         let coder = saved
             .personalities
             .iter()

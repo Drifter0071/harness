@@ -490,14 +490,19 @@ pub async fn get_bip_state(state: State<'_, AppState>) -> Result<BipState, Strin
 
 // ============================= Agent personalities =============================
 //
-// Global, app-wide. The frontend's Agent Manager is the only writer;
-// the agent loop reads via `resolve_active_model_for_personality` and
-// `personality_snapshot` at session start. See
-// `docs/superpowers/specs/2026-08-13--global-personalities.md` (the
-// spec for the new editor that this commit introduces).
+// Global, app-wide. The frontend's Agent Manager is the only writer.
+//
+// After the v3 chat-agent-as-orchestrator refactor, the chat agent
+// itself isn't a personality — every session runs the hardcoded
+// Orchestrator. The roster is the home for the four subagent
+// personalities (Coder, Architect, Researcher, HealthMonitor) the
+// orchestrator may dispatch to in a future subagent loop.
+// `resolve_active_model_for_personality` is the helper the dispatcher
+// will use to pick a saved model for a subagent at dispatch time. See
+// `docs/superpowers/specs/2026-08-13--global-personalities.md`.
 
-/// Load the global personality roster. On first contact, seeds five
-/// builtin rows (one per `AgentRole`) and persists the file.
+/// Load the global personality roster. On first contact, seeds four
+/// builtin rows (one per subagent `AgentRole`) and persists the file.
 #[tauri::command]
 pub async fn load_personalities() -> Result<PersonalityRoster, String> {
     crate::personalities::load_personalities().await
@@ -534,8 +539,11 @@ pub async fn get_personality(id: String) -> Result<AgentPersonality, String> {
 /// and confirm it still exists. Otherwise return `None` so the caller
 /// can fall back to the active chat model.
 ///
-/// This is the only place we read both files; the agent loop calls
-/// this at session start.
+/// Reserved for the future subagent-dispatch loop: the chat agent
+/// itself is the hardcoded Orchestrator and doesn't use per-personality
+/// model overrides. Kept here so the subagent dispatcher can pick the
+/// right saved model when the orchestrator decides to delegate.
+#[allow(dead_code)]
 pub async fn resolve_active_model_for_personality(
     personality: &AgentPersonality,
 ) -> Result<Option<String>, String> {

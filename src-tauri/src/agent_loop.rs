@@ -1,4 +1,4 @@
-//! Rust-owned agent turn loop (spec §4, §5).
+﻿//! Rust-owned agent turn loop (spec Â§4, Â§5).
 //!
 //! One `run_agent_turn` call drives a complete agent turn: stream the
 //! provider response, execute requested tool calls through the policy gate
@@ -212,7 +212,7 @@ impl AgentEventSink for AppEventSink {
 
 /// Per-turn cancellation: the sender is registered in the `in_flight` map
 /// so `cancel_agent(request_id)` can flip it; the loop races `changed()` /
-/// `wait_for()` at every await. Watch receivers are "sticky" — a cancel sent
+/// `wait_for()` at every await. Watch receivers are "sticky" â€” a cancel sent
 /// between awaits is observed at the next await, so no cancellation is lost.
 fn new_cancel_token() -> (watch::Sender<bool>, watch::Receiver<bool>) {
     watch::channel(false)
@@ -252,7 +252,7 @@ fn is_mutating(name: &str) -> bool {
 
 /// Rebuild the provider history from persisted session messages. Tool-granular
 /// `role:"tool"` records are not persisted (they live in `activities`), so a
-/// fresh turn replays user/assistant text only — the assistant summary carries
+/// fresh turn replays user/assistant text only â€” the assistant summary carries
 /// the state across turns. Within a turn, the loop keeps the full
 /// assistant-echo + tool-result sequence in `messages` so OpenAI accepts
 /// multi-round tool use.
@@ -271,11 +271,11 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
 }
 
 fn build_system_prompt(
-    personality_prompt: &str,
+    orchestrator_prompt: &str,
     workspace: &str,
     goal_mode: bool,
 ) -> String {
-    let mut prompt = personality_prompt.to_string();
+    let mut prompt = orchestrator_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
     prompt.push_str(
@@ -323,7 +323,7 @@ fn merge_usage(stats: &mut Option<TokenStats>, usage: &ChatUsage) {
     });
     s.last_in = usage.input;
     s.last_out = usage.output;
-    // `cumulativeIn` is the peak input size, not a sum (spec §4.5).
+    // `cumulativeIn` is the peak input size, not a sum (spec Â§4.5).
     s.cumulative_in = s.cumulative_in.max(usage.input);
     s.cumulative_out = s.cumulative_out.saturating_add(usage.output);
 }
@@ -352,14 +352,14 @@ fn user_message(session: &mut Session, text: &str) {
 /// (`agent-<requestId>`) that the frontend pre-inserts into the store, so
 /// the persisted message and the in-memory placeholder stay the same
 /// row. Without this, the assistant text lands in a fresh-UUID message
-/// while the placeholder stays empty in the session file — which is
+/// while the placeholder stays empty in the session file â€” which is
 /// Persist the final assistant message for the turn. This is an
 /// UPSERT, not an append: multi-round turns previously pushed one
 /// message per round under the same `agent-<requestId>` id, which
 /// persisted a stack of blank assistant rows for tool rounds (each
 /// round's empty or interim text) and made reloaded sessions show
 /// empty bubbles. Replacing the row keeps exactly one assistant
-/// message per turn — the final answer.
+/// message per turn â€” the final answer.
 ///
 /// `resolved` is the personality bundle computed at the start of
 /// the turn; we use its `personality_id` + `name` (not the session
@@ -424,7 +424,7 @@ async fn persist(session: &mut Session) {
 /// Stamp the `lastTurn` marker onto the session and persist. Called on
 /// every terminal transition (done / error) so the session file becomes a
 /// self-describing record of "the turn with this requestId ended in this
-/// status at this time" — independent of the in-process Tauri event bus.
+/// status at this time" â€” independent of the in-process Tauri event bus.
 ///
 /// The frontend uses this as a disk-based completion signal when
 /// streaming events don't reach the WebView, so responses still appear
@@ -531,19 +531,28 @@ enum TurnFinish {
     },
 }
 
-/// Resolved personality values for a turn. Computed once at session
-/// start from the global roster (via `Session::resolve_personality`)
-/// and threaded through the loop so every tool call + every message
-/// persistence uses the same name / role / prompt / model id.
+/// Resolved chat-agent bundle for a turn. After the v3
+/// chat-agent-as-orchestrator refactor, every chat turn is the
+/// Orchestrator; the per-turn bundle carries the orchestrator's
+/// stable id / name (used to label assistant messages), the role
+/// (used to gate role-restricted tools), the orchestrator's system
+/// prompt, and the model id the frontend picked for chat.
 #[derive(Debug, Clone)]
 struct ResolvedAgent {
+    /// Stable id used to label messages and session summary.
+    /// Always `ORCHESTRATOR_AGENT_ID` ("orchestrator").
     personality_id: String,
+    /// Human-readable label for the chat agent.
     name: String,
+    /// The chat agent's role â€” always `AgentRole::Orchestrator` â€”
+    /// threaded into the tool context so role-gated tools (like
+    /// `bip`) can check the caller's role.
     role: AgentRole,
+    /// The orchestrator's system prompt (code constant).
     system_prompt: String,
-    /// The model id actually used for the LLM call: the personality's
-    /// `model_id` if set and still present in the saved-models store,
-    /// otherwise the chat model the frontend passed in.
+    /// The model id the frontend picked for chat. The chat agent
+    /// doesn't use per-personality model overrides (those are for
+    /// subagent dispatch, future work).
     model_id: String,
 }
 
@@ -562,47 +571,18 @@ async fn run_agent_turn_inner(
     completer: Arc<dyn TurnCompleter>,
     reasoning_effort: Option<ReasoningEffort>,
 ) {
-    // Resolve the personality (from the global roster) once, so every
-    // tool call + every message persistence uses the same name / role
-    // / prompt / model id. The frontend's `chat_model_id` is the
-    // fallback if the personality has no `modelId` set.
-    let personality = match session.resolve_personality().await {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("Failed to resolve personality: {}", e);
-            sink.emit(
-                "agent-error",
-                json!(ErrorEvent {
-                    request_id: &request_id,
-                    kind: "internal",
-                    message: &msg,
-                }),
-            );
-            let _ = in_flight.remove(&request_id);
-            return;
-        }
-    };
-    let resolved_model_id = match crate::commands::resolve_active_model_for_personality(
-        &personality,
-    )
-    .await
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => chat_model_id.clone(),
-        Err(e) => {
-            // Stale model id or read failure: fall back to the chat
-            // model and keep going. The frontend surfaces the warning
-            // if the chat model itself is missing.
-            eprintln!("[harness] personality model resolution failed: {}", e);
-            chat_model_id.clone()
-        }
-    };
+    // The chat agent is always the Orchestrator. The orchestrator's
+    // system prompt is a code constant; the chat model is whatever the
+    // frontend passed in (`run_agent_turn`). Subagent personalities
+    // (Coder, Architect, Researcher, HealthMonitor) live in the global
+    // roster and are read live by the future subagent dispatch loop
+    // (out of scope for v0).
     let resolved = ResolvedAgent {
-        personality_id: personality.id.clone(),
-        name: personality.name.clone(),
-        role: personality.role,
-        system_prompt: personality.system_prompt.clone(),
-        model_id: resolved_model_id,
+        personality_id: crate::session::ORCHESTRATOR_AGENT_ID.to_string(),
+        name: "Orchestrator".to_string(),
+        role: AgentRole::Orchestrator,
+        system_prompt: crate::agent::ORCHESTRATOR_PROMPT.to_string(),
+        model_id: chat_model_id.clone(),
     };
 
     let outcome = run_turn_core(
@@ -924,7 +904,7 @@ fn error_vocab(e: &AgentTurnError) -> (&'static str, String) {
         AgentTurnError::Auth(m) => ("auth", m.clone()),
         AgentTurnError::RateLimited(_) => (
             "rate_limited",
-            "Provider rate limit hit — try again shortly".into(),
+            "Provider rate limit hit â€” try again shortly".into(),
         ),
         AgentTurnError::Network(m) => ("network", m.clone()),
         AgentTurnError::Provider(m) => ("provider", m.clone()),
@@ -1149,24 +1129,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// One-shot test init: point the global personality roster at a
-    /// tempdir so the agent loop's `resolve_personality` doesn't
-    /// touch the user's real data dir.
-    fn init_test_data_dir() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            // Persist the path for the lifetime of the process by
-            // leaking the TempDir. Tests are short-lived.
-            let path = tmp.path().to_path_buf();
-            std::mem::forget(tmp);
-            unsafe {
-                std::env::set_var("HARNESS_DATA_DIR_OVERRIDE", &path);
-            }
-        });
-    }
-
     struct MockCompleter {
         script: Mutex<VecDeque<Result<TurnOutcome, AgentTurnError>>>,
         requests: Mutex<Vec<ToolChatRequest>>,
@@ -1321,7 +1283,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_mode_continue_then_done() {
-        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             text_outcome("part one [continue]", 1, 1),
             text_outcome("part two", 2, 2),
@@ -1357,7 +1318,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_mode_cap_errors() {
-        init_test_data_dir();
         let script = (0..=GOAL_MAX_TURNS)
             .map(|i| text_outcome("more [continue]", 1, i as u64))
             .collect();
@@ -1372,7 +1332,6 @@ mod tests {
 
     #[tokio::test]
     async fn tool_calls_execute_and_loop() {
-        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "checking".into(),
@@ -1422,7 +1381,6 @@ mod tests {
 
     #[tokio::test]
     async fn risky_tool_requires_approval_and_deny_halts() {
-        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "writing".into(),
@@ -1483,7 +1441,6 @@ mod tests {
 
     #[tokio::test]
     async fn stall_detected() {
-        init_test_data_dir();
         let script = (0..3)
             .map(|_| {
                 Ok(TurnOutcome {
@@ -1519,7 +1476,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_mid_approval_resolves_denied() {
-        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![Ok(TurnOutcome {
             text: "writing".into(),
             reasoning: String::new(),

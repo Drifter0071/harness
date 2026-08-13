@@ -12,7 +12,12 @@
 
 import { useEffect } from "react";
 import { useStore } from "./store";
-import { ipc, agentEvents } from "./ipc";
+import {
+  ipc,
+  agentEvents,
+  ORCHESTRATOR_AGENT_ID,
+  ORCHESTRATOR_AGENT_NAME,
+} from "./ipc";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ActionMode,
@@ -46,35 +51,30 @@ interface PendingSnapshot {
 let pending: PendingSnapshot | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Personality snapshot of the currently loaded session. Only the
- *  `personalityId` is needed at write time; the rest of the fields
- *  (`name`, `role`, `systemPrompt`, `modelId`) are read live from
- *  the global roster via `resolveAgentMeta`. */
+/** The chat agent on the currently loaded session. After the v3
+ *  chat-agent-as-orchestrator refactor this is always the
+ *  Orchestrator (a hardcoded identity), but we keep the snapshot
+ *  pointer so legacy session files that carry their own agent
+ *  block still round-trip without surprise. */
 let currentAgent: AgentSnapshot | null = null;
 /** Session id currently loaded in the store (guards the switch watcher). */
 let loadedSessionId: string | null = null;
 
 function fallbackAgent(): AgentSnapshot {
-  return {
-    personalityId: "builtin-orchestrator",
-  };
+  return {};
 }
 
-/** Resolve the live `name` / `role` for the current session's
- *  personality from the global roster. Falls back to the
- *  `personalityId` + a generic "Orchestrator" role when the
- *  personality has been deleted or the roster hasn't loaded yet —
- *  the next successful save will rewrite the placeholder with the
- *  correct values. */
+/** Resolve the live `name` / `role` for the chat agent on the
+ *  current session. After the v3 chat-agent-as-orchestrator
+ *  refactor this is always the Orchestrator — the function is
+ *  preserved for the callsites that stamp a label on assistant
+ *  placeholders but no longer consults the personalities roster. */
 function resolveAgentMeta(): { id: string; name: string; role: string } {
-  const fallback = fallbackAgent();
-  const personalityId = currentAgent?.personalityId?.trim() || fallback.personalityId;
-  const roster = useStore.getState().personalities;
-  const p = roster?.personalities.find((x) => x.id === personalityId);
-  if (p) {
-    return { id: p.id, name: p.name, role: p.role };
-  }
-  return { id: personalityId, name: personalityId, role: "Orchestrator" };
+  return {
+    id: ORCHESTRATOR_AGENT_ID,
+    name: ORCHESTRATOR_AGENT_NAME,
+    role: "Orchestrator",
+  };
 }
 
 async function refreshSessions(projectPath: string): Promise<void> {
@@ -193,16 +193,12 @@ export async function flushPendingSave(): Promise<void> {
 
 /** Apply a loaded session to the store. */
 function applySession(session: Session, projectPath: string): void {
-  // Heal legacy v1 sessions: when the snapshot only carries the old
-  // `id` field, lift it into `personalityId` so the rest of the
-  // session-manager code can treat it like a v2 snapshot. The first
-  // save rewrites the file in the new shape.
-  if (!session.agent.personalityId) {
-    const legacyId = session.agent.id?.trim();
-    if (legacyId) {
-      session.agent = { ...session.agent, personalityId: legacyId };
-    }
-  }
+  // After the v3 chat-agent-as-orchestrator refactor the per-session
+  // agent identity is gone — every session runs the same hardcoded
+  // chat agent. We still keep a pointer to the deserialized snapshot
+  // so legacy v1 / v2 session files that carry their own agent
+  // block round-trip without surprise; the snapshot is no longer
+  // consulted by the agent loop or the chat header.
   currentAgent = session.agent;
   loadedSessionId = session.id;
   // Heal legacy files where the agent loop persisted one assistant

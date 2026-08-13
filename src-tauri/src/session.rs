@@ -101,26 +101,21 @@ pub struct ToolActivity {
     pub arguments: Option<Value>,
 }
 
-/// Snapshot of the agent personality that drives a session. After the
-/// global-personalities change, a session only carries the
-/// `personalityId`; the live name / role / system prompt / model id are
-/// resolved from the global personality roster at session start.
-///
-/// Old session files (v1) embed the full snapshot with
-/// `id` / `name` / `role` / `systemPrompt`. On load we still parse
-/// them — `personalityId` is filled in from the legacy `id` field, and
-/// the rest is dropped. The next persist writes the new shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Marker struct on a `Session`. After the v3 chat-agent-as-orchestrator
+/// refactor, every session runs the Orchestrator (the chat agent); the
+/// subagent personalities (Coder, Architect, Researcher, HealthMonitor)
+/// live in the global roster and are read live for future subagent
+/// dispatch. The session file carries a near-empty marker so the
+/// payload shape stays stable; legacy v1 / v2 session files that
+/// embedded a full personality snapshot still load — the fields are
+/// parsed but no longer used by the agent loop.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshot {
-    /// Stable id of the personality in the global roster. New sessions
-    /// always carry this; legacy sessions fill it in from the old
-    /// `id` field on load.
-    #[serde(default)]
-    pub personality_id: String,
     /// Legacy v1 fields. Accepted on input so old session files keep
-    /// loading, but never serialized (the global roster is the source
-    /// of truth for name / role / prompt / model).
+    /// loading, but never serialized. The current model doesn't carry
+    /// a per-session agent identity; the chat is always the
+    /// Orchestrator.
     #[serde(default, skip_serializing)]
     pub id: Option<String>,
     #[serde(default, skip_serializing)]
@@ -132,71 +127,25 @@ pub struct AgentSnapshot {
 }
 
 impl AgentSnapshot {
-    /// Build a snapshot for a new session from a personality id.
-    pub fn from_personality_id(personality_id: impl Into<String>) -> Self {
-        Self {
-            personality_id: personality_id.into(),
-            id: None,
-            name: None,
-            role: None,
-            system_prompt: None,
-        }
-    }
-
-    /// Pull the personalityId from a v1-shaped legacy snapshot that
-    /// carried its data inline. Returns the new shape with the
-    /// legacy fields dropped.
-    pub fn from_legacy(
-        id: String,
-        _name: String,
-        _role: AgentRole,
-        _system_prompt: String,
-    ) -> Self {
-        Self::from_personality_id(id)
-    }
-
     /// Stable id for the snapshot, used in the session summary's
-    /// `agent_id` slot. Prefers the legacy `id` field (only present on
-    /// v1 payloads) and falls back to the `personality_id` (always set
-    /// on v2). This keeps the frontend's `session.agent.id` accessor
-    /// non-empty for both shapes.
+    /// `agent_id` slot. Every session's agent is the Orchestrator
+    /// (the chat agent); this returns the constant orchestrator id
+    /// used elsewhere in the app.
     pub fn agent_id(&self) -> String {
-        self.id
-            .clone()
-            .unwrap_or_else(|| self.personality_id.clone())
+        ORCHESTRATOR_AGENT_ID.to_string()
     }
 
-    /// Human display name for the snapshot, used in the session list
-    /// and any UI that wants a label without hitting the global roster.
-    /// Falls back to a derived label from the personality id when the
-    /// legacy `name` field is absent (the v2 case).
+    /// Human display name for the snapshot. Every session is the
+    /// Orchestrator.
     pub fn agent_name(&self) -> String {
-        if let Some(name) = &self.name {
-            return name.clone();
-        }
-        // Stable builtin ids look like `builtin-orchestrator`; render
-        // them as `Orchestrator` so the sidebar shows a friendly label
-        // even when the global roster isn't loaded yet.
-        let raw = self.personality_id.clone();
-        if let Some(stripped) = raw.strip_prefix("builtin-") {
-            let mut out = String::new();
-            let mut capitalize = true;
-            for ch in stripped.chars() {
-                if ch == '-' {
-                    capitalize = true;
-                    out.push(' ');
-                } else if capitalize {
-                    out.extend(ch.to_uppercase());
-                    capitalize = false;
-                } else {
-                    out.push(ch);
-                }
-            }
-            return out;
-        }
-        raw
+        "Orchestrator".to_string()
     }
 }
+
+/// Stable id used in the session summary's `agent_id` slot and the
+/// chat header's "Agent" label. The chat agent is always the
+/// Orchestrator; this id is the canonical reference.
+pub const ORCHESTRATOR_AGENT_ID: &str = "orchestrator";
 
 /// In-band "this turn finished" marker written by the agent loop on the
 /// final persist, right before the terminal event. The frontend uses it as
@@ -254,42 +203,14 @@ fn default_version() -> u32 {
 }
 
 pub fn default_agent_snapshot() -> AgentSnapshot {
-    AgentSnapshot {
-        personality_id: crate::personalities::builtin_personality_id(AgentRole::Orchestrator),
-        id: None,
-        name: None,
-        role: None,
-        system_prompt: None,
-    }
+    AgentSnapshot::default()
 }
 
-impl Session {
-    /// Resolve the live personality for this session from the global
-    /// roster. The `personalityId` on `Session.agent` is the canonical
-    /// reference; everything else (name, role, system prompt, model
-    /// id) is read from the roster at call time so editing a
-    /// personality affects every future session start.
-    ///
-    /// If the personality id is missing (a blank `Session.agent`) or
-    /// the personality was deleted from the roster, we fall back to
-    /// the roster's default personality.
-    pub async fn resolve_personality(
-        &self,
-    ) -> Result<crate::personalities::AgentPersonality, String> {
-        let id = self.agent.personality_id.trim();
-        let roster = crate::personalities::load_personalities().await?;
-        if !id.is_empty() {
-            if let Some(p) = roster.personalities.iter().find(|p| p.id == id) {
-                return Ok(p.clone());
-            }
-        }
-        // Fall back to the default.
-        roster
-            .personalities
-            .into_iter()
-            .find(|p| p.id == roster.default_personality_id)
-            .ok_or_else(|| "Personalities roster is empty after enforce_invariants".to_string())
-    }
+/// Load the live subagent personalities roster (read-only) so the
+/// agent loop can include subagent context in the orchestrator's
+/// system prompt. Future work: dispatch subagents by id from here.
+pub async fn load_subagent_roster() -> Result<crate::personalities::PersonalityRoster, String> {
+    crate::personalities::load_personalities().await
 }
 
 /// Lightweight per-session metadata for the Sessions panel. The full
@@ -513,18 +434,13 @@ pub async fn create_session(
     let dir = ensure_sessions_dir(project_path).await?;
     let now = now_iso();
     let id = Uuid::new_v4().to_string();
-    // Heal a legacy v1 snapshot: if the frontend sent an `id` but
-    // no `personalityId`, lift the legacy `id` into the new field.
-    let agent = match agent {
-        Some(mut a) => {
-            if a.personality_id.trim().is_empty() {
-                if let Some(legacy) = a.id.take() {
-                    a.personality_id = legacy;
-                }
-            }
-            a
-        }
-        None => default_agent_snapshot(),
+    // After the v3 chat-agent-as-orchestrator refactor, every session
+    // runs the Orchestrator. The `agent` arg is accepted for legacy
+    // IPC compatibility (frontend callers used to pass a
+    // `personalityId`) but it's discarded — the field is preserved in
+    // the legacy deserialized fields if the caller sent any, and
+    // dropped on the next save.
+    let agent = agent.unwrap_or_default();
     };
     let session = Session {
         version: 2,
@@ -1408,11 +1324,10 @@ mod tests {
         let parsed: Session = serde_json::from_str(from_ts).unwrap();
         assert_eq!(parsed.project_path, "/p");
         assert_eq!(parsed.version, 1); // normalized to 2 on save
-        // v1 sessions carried the personality inline as `id`; the v2
-        // deserializer lifts it into `personalityId`. The healing
-        // happens at the `create_session` boundary, so the raw
-        // deserialized value still has `id` set and `personalityId`
-        // empty until first save.
+        // v1 sessions carried the personality inline as `id`. The
+        // v3 deserializer (this revision) keeps the legacy field
+        // around for back-compat reads but no longer treats the value
+        // as a personality id — the chat is always the Orchestrator.
         assert_eq!(parsed.agent.id.as_deref(), Some("harness"));
     }
 }

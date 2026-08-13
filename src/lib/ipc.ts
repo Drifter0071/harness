@@ -76,15 +76,14 @@ export interface ToolActivity {
   arguments?: unknown;
 }
 
-/** Snapshot of the agent personality that drives a session. After the
- *  global-personalities change, only the `personalityId` is stored
- *  on the session; the rest of the fields (name, role, system prompt,
- *  model id) come from the global personality roster at session
- *  start. Old session files (v1) embedded the full snapshot; the
- *  legacy `id` field is still read on the TS side so rehydrated
- *  sessions can match back to a personality. */
+/** Marker for the chat agent on a `Session`. After the
+ *  chat-agent-as-orchestrator refactor, every session runs the
+ *  Orchestrator (a hardcoded chat agent — not a user-editable
+ *  personality). The session file carries this near-empty marker
+ *  for shape stability; legacy v1 / v2 session files that embedded
+ *  a full personality snapshot still load but the values are no
+ *  longer used by the agent loop. */
 export interface AgentSnapshot {
-  personalityId: string;
   /** Legacy v1 field, kept for back-compat when rehydrating. */
   id?: string;
   name?: string;
@@ -315,11 +314,24 @@ export interface ChatError {
 
 // ── Agent roster + turn loop (agent-sessions spec) ──
 
-/** Default system prompt for a role, as seeded on first contact.
- *  Mirrors `AgentRole::default_prompt()` on the Rust side. */
-export const DEFAULT_PROMPTS: Record<AgentRole, string> = {
-  Orchestrator:
-    "You are the orchestrator. You coordinate sub-agents, break down goals into tasks, and synthesize results.",
+/** Stable id of the chat agent. The chat is always the Orchestrator —
+ *  it isn't a user-editable personality, just a hardcoded identity the
+ *  user talks to. Mirrors `session::ORCHESTRATOR_AGENT_ID` on the Rust side. */
+export const ORCHESTRATOR_AGENT_ID = "orchestrator";
+
+/** Display label for the chat agent. Mirrors the human-readable name
+ *  the agent loop stamps on assistant messages. */
+export const ORCHESTRATOR_AGENT_NAME = "Orchestrator";
+
+/** Default system prompt for a subagent role, as seeded on first
+ *  contact. Mirrors `AgentRole::default_prompt()` on the Rust side
+ *  for the four subagent roles. The Orchestrator is NOT included —
+ *  it's the chat agent and its prompt is a code constant
+ *  (`ORCHESTRATOR_PROMPT` in `src-tauri/src/agent.rs`). */
+export const DEFAULT_PROMPTS: Record<
+  Exclude<AgentRole, "Orchestrator">,
+  string
+> = {
   Coder: "You are a senior software engineer. You write clean, efficient code and follow best practices.",
   Architect:
     "You are a system architect. You design systems, evaluate trade-offs, and create technical specifications.",
