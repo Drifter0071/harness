@@ -6,13 +6,13 @@ import { nanoid } from "nanoid";
 import { MessageRenderer } from "./MessageRenderer";
 import { MentionInput, extractMentions } from "./MentionInput";
 import { ModelSelect } from "./ModelSelect";
-import { TypingBuddy } from "./AgentMascot";
+import { TypingBuddy, type BuddyMode } from "./AgentMascot";
 import { formatMessagesForProvider } from "../lib/models";
 import { capabilitiesFor } from "../lib/model-capabilities";
 import { chatErrorActions } from "../lib/chat-errors";
 import { showToast } from "../lib/toast";
 import { startAgentTurn, cancelAgentTurn, respondApproval, flushPendingSave } from "../lib/session-manager";
-import { Send, Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench, Ban, AlertTriangle } from "lucide-react";
+import { Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench, Ban, AlertTriangle } from "lucide-react";
 import type { SessionMessage, Mention, ToolCallRecord } from "../lib/store";
 import type { ActionMode, ReasoningEffort } from "../lib/ipc";
 
@@ -43,6 +43,28 @@ export function Chat() {
   const [isProcessing, setIsProcessing] = useState(false); // non-LLM commands
   const [authBlockedFor, setAuthBlockedFor] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Bip animates inside the send button while the user drafts the
+  // message: tapping keys while the draft grows, whipping out a tiny
+  // broom on backspace. Mirrors the previous MentionInput behaviour;
+  // it lives here now because the send button is the visual host.
+  const [buddyMode, setBuddyMode] = useState<BuddyMode>("typing");
+  const prevInputLen = useRef(0);
+  useEffect(() => {
+    const len = input.length;
+    if (len === 0) {
+      prevInputLen.current = 0;
+      return;
+    }
+    if (prevInputLen.current > len) {
+      setBuddyMode("sweeping");
+      const t = setTimeout(() => setBuddyMode("typing"), 800);
+      prevInputLen.current = len;
+      return () => clearTimeout(t);
+    }
+    prevInputLen.current = len;
+    setBuddyMode("typing");
+  }, [input]);
 
   // Keep the latest streaming requestId without re-subscribing.
   const streamingRequestId = useStore((s) => s.streamingRequestId);
@@ -573,13 +595,20 @@ export function Chat() {
               <button
                 onClick={() => handleSubmit()}
                 disabled={!input.trim() || composerBlocked || isProcessing}
-                className="glass-quartz glass-quartz--pill shrink-0 m-1.5 px-3.5 py-3 text-white"
+                // The send button IS Bip. `disabled:opacity-40
+                // disabled:grayscale` keeps Bip visible when the user
+                // hasn't typed anything yet (no text → can't send →
+                // button is disabled) so the user still has a
+                // constant visual anchor in the composer. When they
+                // start typing, Bip wakes up and animates.
+                className="glass-quartz glass-quartz--pill shrink-0 m-1.5 px-3 py-2.5 text-white disabled:opacity-40 disabled:grayscale disabled:saturate-0 transition-opacity"
                 title="Send"
+                aria-label="Send message"
               >
                 {isProcessing ? (
                   <Loader2 size={16} className="animate-spin" />
                 ) : (
-                  <Send size={16} />
+                  <TypingBuddy mode={buddyMode} size={22} />
                 )}
               </button>
             )}
