@@ -1,12 +1,12 @@
 mod agent;
 mod agent_loop;
-mod agents;
 mod capabilities;
 mod commands;
 mod hci;
 mod health_agent;
 mod llm_client;
 mod models;
+mod personalities;
 mod secrets;
 mod session;
 mod session_watcher;
@@ -104,9 +104,11 @@ pub fn run() {
             commands::forget_recent_project,
             commands::touch_recent_project,
             commands::list_files_recursive,
-            // Agent roster + turn loop (agent-sessions spec)
-            commands::load_agent_roster,
-            commands::save_agent_roster,
+            // Global agent personalities (this commit)
+            commands::load_personalities,
+            commands::save_personalities,
+            commands::get_personality,
+            // Agent turn loop (agent-sessions spec)
             commands::run_agent_turn,
             commands::respond_approval,
             commands::cancel_agent,

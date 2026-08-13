@@ -46,18 +46,35 @@ interface PendingSnapshot {
 let pending: PendingSnapshot | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Agent snapshot of the currently loaded session (preserved on save). */
+/** Personality snapshot of the currently loaded session. Only the
+ *  `personalityId` is needed at write time; the rest of the fields
+ *  (`name`, `role`, `systemPrompt`, `modelId`) are read live from
+ *  the global roster via `resolveAgentMeta`. */
 let currentAgent: AgentSnapshot | null = null;
 /** Session id currently loaded in the store (guards the switch watcher). */
 let loadedSessionId: string | null = null;
 
 function fallbackAgent(): AgentSnapshot {
   return {
-    id: "harness",
-    name: "harness",
-    role: "Orchestrator",
-    systemPrompt: "",
+    personalityId: "builtin-orchestrator",
   };
+}
+
+/** Resolve the live `name` / `role` for the current session's
+ *  personality from the global roster. Falls back to the
+ *  `personalityId` + a generic "Orchestrator" role when the
+ *  personality has been deleted or the roster hasn't loaded yet —
+ *  the next successful save will rewrite the placeholder with the
+ *  correct values. */
+function resolveAgentMeta(): { id: string; name: string; role: string } {
+  const fallback = fallbackAgent();
+  const personalityId = currentAgent?.personalityId?.trim() || fallback.personalityId;
+  const roster = useStore.getState().personalities;
+  const p = roster?.personalities.find((x) => x.id === personalityId);
+  if (p) {
+    return { id: p.id, name: p.name, role: p.role };
+  }
+  return { id: personalityId, name: personalityId, role: "Orchestrator" };
 }
 
 async function refreshSessions(projectPath: string): Promise<void> {
@@ -176,6 +193,16 @@ export async function flushPendingSave(): Promise<void> {
 
 /** Apply a loaded session to the store. */
 function applySession(session: Session, projectPath: string): void {
+  // Heal legacy v1 sessions: when the snapshot only carries the old
+  // `id` field, lift it into `personalityId` so the rest of the
+  // session-manager code can treat it like a v2 snapshot. The first
+  // save rewrites the file in the new shape.
+  if (!session.agent.personalityId) {
+    const legacyId = session.agent.id?.trim();
+    if (legacyId) {
+      session.agent = { ...session.agent, personalityId: legacyId };
+    }
+  }
   currentAgent = session.agent;
   loadedSessionId = session.id;
   // Heal legacy files where the agent loop persisted one assistant
@@ -312,12 +339,11 @@ function applyTurnCompletionFromDisk(session: Session): void {
 async function loadProject(path: string): Promise<void> {
   useStore.setState({ workspaceStatus: "loading" });
   try {
-    const [summaries, session, files, recent, roster] = await Promise.all([
+    const [summaries, session, files, recent] = await Promise.all([
       ipc.listSessions(path).catch(() => []),
       ipc.loadActiveSession(path).catch(() => null),
       ipc.listFilesRecursive(path).catch(() => []),
       ipc.listRecentProjects().catch(() => []),
-      ipc.loadAgentRoster(path).catch(() => null),
     ]);
 
     let active = session;
@@ -342,7 +368,6 @@ async function loadProject(path: string): Promise<void> {
     useStore.setState({
       fileTree: files,
       recentProjects: recent,
-      agentRoster: roster,
       workspaceStatus: "ready",
     });
 
@@ -386,6 +411,7 @@ export async function startAgentTurn(
   const now = new Date().toISOString();
   const agent = currentAgent ?? fallbackAgent();
 
+  const meta = resolveAgentMeta();
   st.appendMessage({
     id: requestId,
     role: "user",
@@ -398,8 +424,8 @@ export async function startAgentTurn(
     role: "assistant",
     content: "",
     timestamp: now,
-    agentId: agent.id,
-    agentName: agent.name,
+    agentId: meta.id,
+    agentName: meta.name,
   });
   st.setAgentRequestId(requestId);
   st.setPendingApproval(null);
@@ -464,14 +490,14 @@ function ensurePlaceholder(requestId: string): void {
   const st = useStore.getState();
   const id = placeholderId(requestId);
   if (st.messages.some((m) => m.id === id)) return;
-  const agent = currentAgent ?? fallbackAgent();
+  const meta = resolveAgentMeta();
   st.appendMessage({
     id,
     role: "assistant",
     content: "",
     timestamp: new Date().toISOString(),
-    agentId: agent.id,
-    agentName: agent.name,
+    agentId: meta.id,
+    agentName: meta.name,
   });
 }
 
@@ -751,7 +777,6 @@ export function useProjectLifecycle(): void {
           agentRequestId: null,
           pendingApproval: null,
           activeSessionId: null,
-          agentRoster: null,
           fileTree: [],
           workspaceStatus: "noProject",
         });

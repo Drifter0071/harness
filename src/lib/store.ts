@@ -169,9 +169,11 @@ interface HarnessState {
       summary: string;
     } | null
   ) => void;
-  /** Roster for the Agent Manager window; loaded per project. */
-  agentRoster: import("./ipc").AgentRoster | null;
-  setAgentRoster: (roster: import("./ipc").AgentRoster | null) => void;
+  /** Global agent personality roster; loaded once on app mount. */
+  personalities: import("./ipc").PersonalityRoster | null;
+  setPersonalities: (
+    roster: import("./ipc").PersonalityRoster | null,
+  ) => void;
   agentManagerOpen: boolean;
   setAgentManagerOpen: (open: boolean) => void;
 
@@ -316,8 +318,8 @@ export const useStore = create<HarnessState>((set) => ({
   setAgentRequestId: (id) => set({ agentRequestId: id }),
   pendingApproval: null,
   setPendingApproval: (p) => set({ pendingApproval: p }),
-  agentRoster: null,
-  setAgentRoster: (roster) => set({ agentRoster: roster }),
+  personalities: null,
+  setPersonalities: (personalities) => set({ personalities }),
   agentManagerOpen: false,
   setAgentManagerOpen: (open) => set({ agentManagerOpen: open }),
 

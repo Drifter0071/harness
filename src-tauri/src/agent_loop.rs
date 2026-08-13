@@ -24,6 +24,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent::AgentRole;
 use crate::llm_client::{
     complete_with_tools, AgentTurnError, ChatUsage, ToolCall, ToolChatMessage, ToolChatRequest,
     ToolSpec, TurnOutcome,
@@ -269,8 +270,12 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
         .collect()
 }
 
-fn build_system_prompt(session: &Session, workspace: &str, goal_mode: bool) -> String {
-    let mut prompt = session.agent.system_prompt.clone();
+fn build_system_prompt(
+    personality_prompt: &str,
+    workspace: &str,
+    goal_mode: bool,
+) -> String {
+    let mut prompt = personality_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
     prompt.push_str(
@@ -290,16 +295,16 @@ fn build_system_prompt(session: &Session, workspace: &str, goal_mode: bool) -> S
 }
 
 fn build_request(
-    session: &Session,
-    model_id: &str,
+    resolved_model_id: &str,
+    system_prompt: String,
     workspace: &str,
     goal_mode: bool,
     messages: &[ToolChatMessage],
     reasoning_effort: Option<ReasoningEffort>,
 ) -> ToolChatRequest {
     ToolChatRequest {
-        model_id: model_id.to_string(),
-        system_prompt: build_system_prompt(session, workspace, goal_mode),
+        model_id: resolved_model_id.to_string(),
+        system_prompt,
         messages: messages.to_vec(),
         reasoning_effort,
     }
@@ -348,28 +353,24 @@ fn user_message(session: &mut Session, text: &str) {
 /// the persisted message and the in-memory placeholder stay the same
 /// row. Without this, the assistant text lands in a fresh-UUID message
 /// while the placeholder stays empty in the session file — which is
-/// exactly the "empty assistant message" the user sees until they
-/// refresh.
-fn assistant_message_with_id(session: &mut Session, text: &str, id: String) {
-    assistant_message_with_id_and_reasoning(session, text, id, None);
-}
-
-/// Same as [`assistant_message_with_id`] but also persists the
-/// captured chain-of-thought onto the assistant message. The two
-/// helpers exist so call sites that don't track reasoning (chat
-/// streaming, test fixtures) can stay short.
+/// Persist the final assistant message for the turn. This is an
+/// UPSERT, not an append: multi-round turns previously pushed one
+/// message per round under the same `agent-<requestId>` id, which
+/// persisted a stack of blank assistant rows for tool rounds (each
+/// round's empty or interim text) and made reloaded sessions show
+/// empty bubbles. Replacing the row keeps exactly one assistant
+/// message per turn — the final answer.
 ///
-/// This is an UPSERT, not an append: multi-round turns previously
-/// pushed one message per round under the same `agent-<requestId>`
-/// id, which persisted a stack of blank assistant rows for tool
-/// rounds (each round's empty or interim text) and made reloaded
-/// sessions show empty bubbles. Replacing the row keeps exactly one
-/// assistant message per turn — the final answer.
+/// `resolved` is the personality bundle computed at the start of
+/// the turn; we use its `personality_id` + `name` (not the session
+/// snapshot) because those are the values the user sees in the
+/// chat header.
 fn assistant_message_with_id_and_reasoning(
     session: &mut Session,
     text: &str,
     id: String,
     reasoning: Option<String>,
+    resolved: &ResolvedAgent,
 ) {
     let reasoning = reasoning.filter(|r| !r.is_empty());
     let msg = Message {
@@ -378,8 +379,8 @@ fn assistant_message_with_id_and_reasoning(
         content: text.to_string(),
         timestamp: now_iso(),
         mentions: Vec::new(),
-        agent_id: Some(session.agent.id.clone()),
-        agent_name: Some(session.agent.name.clone()),
+        agent_id: Some(resolved.personality_id.clone()),
+        agent_name: Some(resolved.name.clone()),
         reasoning,
     };
     if let Some(existing) = session.messages.iter_mut().find(|m| m.id == id) {
@@ -530,11 +531,27 @@ enum TurnFinish {
     },
 }
 
+/// Resolved personality values for a turn. Computed once at session
+/// start from the global roster (via `Session::resolve_personality`)
+/// and threaded through the loop so every tool call + every message
+/// persistence uses the same name / role / prompt / model id.
+#[derive(Debug, Clone)]
+struct ResolvedAgent {
+    personality_id: String,
+    name: String,
+    role: AgentRole,
+    system_prompt: String,
+    /// The model id actually used for the LLM call: the personality's
+    /// `model_id` if set and still present in the saved-models store,
+    /// otherwise the chat model the frontend passed in.
+    model_id: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_turn_inner(
     request_id: String,
     mut session: Session,
-    model_id: String,
+    chat_model_id: String,
     message_text: String,
     action_mode: ActionMode,
     goal_mode: bool,
@@ -545,10 +562,52 @@ async fn run_agent_turn_inner(
     completer: Arc<dyn TurnCompleter>,
     reasoning_effort: Option<ReasoningEffort>,
 ) {
+    // Resolve the personality (from the global roster) once, so every
+    // tool call + every message persistence uses the same name / role
+    // / prompt / model id. The frontend's `chat_model_id` is the
+    // fallback if the personality has no `modelId` set.
+    let personality = match session.resolve_personality().await {
+        Ok(p) => p,
+        Err(e) => {
+            sink.emit(
+                "agent-error",
+                json!(ErrorEvent {
+                    request_id: &request_id,
+                    kind: "internal",
+                    message: format!("Failed to resolve personality: {}", e),
+                }),
+            );
+            let _ = in_flight.remove(&request_id);
+            return;
+        }
+    };
+    let resolved_model_id = match crate::commands::resolve_active_model_for_personality(
+        &personality,
+    )
+    .await
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => chat_model_id.clone(),
+        Err(e) => {
+            // Stale model id or read failure: fall back to the chat
+            // model and keep going. The frontend surfaces the warning
+            // if the chat model itself is missing.
+            eprintln!("[harness] personality model resolution failed: {}", e);
+            chat_model_id.clone()
+        }
+    };
+    let resolved = ResolvedAgent {
+        personality_id: personality.id.clone(),
+        name: personality.name.clone(),
+        role: personality.role,
+        system_prompt: personality.system_prompt.clone(),
+        model_id: resolved_model_id,
+    };
+
     let outcome = run_turn_core(
         &request_id,
         &mut session,
-        &model_id,
+        &resolved,
         &message_text,
         &action_mode,
         goal_mode,
@@ -618,7 +677,7 @@ async fn run_agent_turn_inner(
 async fn run_turn_core(
     request_id: &str,
     session: &mut Session,
-    model_id: &str,
+    resolved: &ResolvedAgent,
     message_text: &str,
     action_mode: &ActionMode,
     goal_mode: bool,
@@ -672,9 +731,10 @@ async fn run_turn_core(
         }
 
         // -- Provider call, raced against cancellation --
+        let system_prompt = build_system_prompt(&resolved.system_prompt, workspace, goal_mode);
         let request = build_request(
-            session,
-            model_id,
+            &resolved.model_id,
+            system_prompt,
             workspace,
             goal_mode,
             &messages,
@@ -770,6 +830,7 @@ async fn run_turn_core(
             &final_text,
             format!("agent-{request_id}"),
             reasoning,
+            resolved,
         );
         merge_usage(&mut session.token_stats, &outcome.usage);
         persist(session).await;
@@ -1005,7 +1066,7 @@ async fn execute_one(
     );
 
     let result = match execute_tool(
-        &ToolContext::for_agent(workspace, session.agent.role.clone(), sink.clone()),
+        &ToolContext::for_agent(workspace, resolved.role, sink.clone()),
         &call.name,
         &call.arguments,
     )
@@ -1084,6 +1145,24 @@ fn status_name(s: &ToolActivityStatus) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// One-shot test init: point the global personality roster at a
+    /// tempdir so the agent loop's `resolve_personality` doesn't
+    /// touch the user's real data dir.
+    fn init_test_data_dir() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            // Persist the path for the lifetime of the process by
+            // leaking the TempDir. Tests are short-lived.
+            let path = tmp.path().to_path_buf();
+            std::mem::forget(tmp);
+            unsafe {
+                std::env::set_var("HARNESS_DATA_DIR_OVERRIDE", &path);
+            }
+        });
+    }
 
     struct MockCompleter {
         script: Mutex<VecDeque<Result<TurnOutcome, AgentTurnError>>>,
@@ -1239,6 +1318,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_mode_continue_then_done() {
+        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             text_outcome("part one [continue]", 1, 1),
             text_outcome("part two", 2, 2),
@@ -1274,6 +1354,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_mode_cap_errors() {
+        init_test_data_dir();
         let script = (0..=GOAL_MAX_TURNS)
             .map(|i| text_outcome("more [continue]", 1, i as u64))
             .collect();
@@ -1288,6 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_calls_execute_and_loop() {
+        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "checking".into(),
@@ -1337,6 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn risky_tool_requires_approval_and_deny_halts() {
+        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "writing".into(),
@@ -1397,6 +1480,7 @@ mod tests {
 
     #[tokio::test]
     async fn stall_detected() {
+        init_test_data_dir();
         let script = (0..3)
             .map(|_| {
                 Ok(TurnOutcome {
@@ -1432,6 +1516,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_mid_approval_resolves_denied() {
+        init_test_data_dir();
         let completer = Arc::new(MockCompleter::new(vec![Ok(TurnOutcome {
             text: "writing".into(),
             reasoning: String::new(),

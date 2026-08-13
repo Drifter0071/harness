@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::agent::{Agent, AgentMessage, AgentRole, AgentStatus};
 use crate::llm_client;
 use crate::models as models_mod;
+use crate::personalities::{AgentPersonality, PersonalityRoster};
 use crate::secrets::SecretStore;
 use crate::tools::BipState;
 
@@ -395,19 +396,6 @@ pub async fn set_active_session(project_path: String, session_id: String) -> Res
     crate::session::set_active_session(&project_path, &session_id).await
 }
 
-#[tauri::command]
-pub async fn load_agent_roster(project_path: String) -> Result<crate::agents::AgentRoster, String> {
-    crate::agents::load_agent_roster(&project_path).await
-}
-
-#[tauri::command]
-pub async fn save_agent_roster(
-    project_path: String,
-    roster: crate::agents::AgentRoster,
-) -> Result<crate::agents::AgentRoster, String> {
-    crate::agents::save_agent_roster(&project_path, &roster).await
-}
-
 // ============================= Agent turn loop =============================
 
 /// Kick off one agent turn for a session. Returns immediately; progress
@@ -498,6 +486,72 @@ pub async fn cancel_agent(request_id: String, state: State<'_, AppState>) -> Res
 #[tauri::command]
 pub async fn get_bip_state(state: State<'_, AppState>) -> Result<BipState, String> {
     Ok(state.bip_state.read().await.clone())
+}
+
+// ============================= Agent personalities =============================
+//
+// Global, app-wide. The frontend's Agent Manager is the only writer;
+// the agent loop reads via `resolve_active_model_for_personality` and
+// `personality_snapshot` at session start. See
+// `docs/superpowers/specs/2026-08-13--global-personalities.md` (the
+// spec for the new editor that this commit introduces).
+
+/// Load the global personality roster. On first contact, seeds five
+/// builtin rows (one per `AgentRole`) and persists the file.
+#[tauri::command]
+pub async fn load_personalities() -> Result<PersonalityRoster, String> {
+    crate::personalities::load_personalities().await
+}
+
+/// Persist the global personality roster atomically. Enforces builtin
+/// invariants and returns the normalized roster.
+#[tauri::command]
+pub async fn save_personalities(
+    roster: PersonalityRoster,
+) -> Result<PersonalityRoster, String> {
+    crate::personalities::save_personalities(&roster).await
+}
+
+/// Look up one personality by id. Returns the default personality if
+/// the id is unknown (so a session always has something to run with).
+#[tauri::command]
+pub async fn get_personality(id: String) -> Result<AgentPersonality, String> {
+    match crate::personalities::get_personality(&id).await? {
+        Some(p) => Ok(p),
+        None => {
+            let roster = crate::personalities::load_personalities().await?;
+            Ok(roster
+                .personalities
+                .into_iter()
+                .find(|p| p.id == roster.default_personality_id)
+                .expect("default personality must exist after enforce_invariants"))
+        }
+    }
+}
+
+/// Resolve which saved-model id a personality should use. If the
+/// personality has a `modelId`, look it up in the saved-models store
+/// and confirm it still exists. Otherwise return `None` so the caller
+/// can fall back to the active chat model.
+///
+/// This is the only place we read both files; the agent loop calls
+/// this at session start.
+pub async fn resolve_active_model_for_personality(
+    personality: &AgentPersonality,
+) -> Result<Option<String>, String> {
+    let Some(model_id) = personality.model_id.as_ref() else {
+        return Ok(None);
+    };
+    // Read the saved-models file directly (no keyring) so the lookup
+    // works in tests and doesn't depend on the secret store.
+    let file = models_mod::read_models_file().await?;
+    if file.models.iter().any(|m| m.id == *model_id) {
+        Ok(Some(model_id.clone()))
+    } else {
+        // Stale reference — the user removed the model after picking
+        // it. Treat as "no override" and let the chat model take over.
+        Ok(None)
+    }
 }
 
 #[tauri::command]

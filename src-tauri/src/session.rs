@@ -101,16 +101,59 @@ pub struct ToolActivity {
     pub arguments: Option<Value>,
 }
 
-/// Snapshot of the agent personality that drives a session. Persisted so
-/// reopening a session restores the exact agent even if the roster later
-/// changes; the orchestrator dispatch reuses this field.
+/// Snapshot of the agent personality that drives a session. After the
+/// global-personalities change, a session only carries the
+/// `personalityId`; the live name / role / system prompt / model id are
+/// resolved from the global personality roster at session start.
+///
+/// Old session files (v1) embed the full snapshot with
+/// `id` / `name` / `role` / `systemPrompt`. On load we still parse
+/// them — `personalityId` is filled in from the legacy `id` field, and
+/// the rest is dropped. The next persist writes the new shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshot {
-    pub id: String,
-    pub name: String,
-    pub role: AgentRole,
-    pub system_prompt: String,
+    /// Stable id of the personality in the global roster. New sessions
+    /// always carry this; legacy sessions fill it in from the old
+    /// `id` field on load.
+    #[serde(default)]
+    pub personality_id: String,
+    /// Legacy v1 fields. Accepted on input so old session files keep
+    /// loading, but never serialized (the global roster is the source
+    /// of truth for name / role / prompt / model).
+    #[serde(default, skip_serializing)]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub role: Option<AgentRole>,
+    #[serde(default, skip_serializing)]
+    pub system_prompt: Option<String>,
+}
+
+impl AgentSnapshot {
+    /// Build a snapshot for a new session from a personality id.
+    pub fn from_personality_id(personality_id: impl Into<String>) -> Self {
+        Self {
+            personality_id: personality_id.into(),
+            id: None,
+            name: None,
+            role: None,
+            system_prompt: None,
+        }
+    }
+
+    /// Pull the personalityId from a v1-shaped legacy snapshot that
+    /// carried its data inline. Returns the new shape with the
+    /// legacy fields dropped.
+    pub fn from_legacy(
+        id: String,
+        _name: String,
+        _role: AgentRole,
+        _system_prompt: String,
+    ) -> Self {
+        Self::from_personality_id(id)
+    }
 }
 
 /// In-band "this turn finished" marker written by the agent loop on the
@@ -170,10 +213,40 @@ fn default_version() -> u32 {
 
 pub fn default_agent_snapshot() -> AgentSnapshot {
     AgentSnapshot {
-        id: "harness".into(),
-        name: "harness".into(),
-        role: AgentRole::Orchestrator,
-        system_prompt: AgentRole::Orchestrator.default_prompt().to_string(),
+        personality_id: crate::personalities::builtin_personality_id(AgentRole::Orchestrator),
+        id: None,
+        name: None,
+        role: None,
+        system_prompt: None,
+    }
+}
+
+impl Session {
+    /// Resolve the live personality for this session from the global
+    /// roster. The `personalityId` on `Session.agent` is the canonical
+    /// reference; everything else (name, role, system prompt, model
+    /// id) is read from the roster at call time so editing a
+    /// personality affects every future session start.
+    ///
+    /// If the personality id is missing (a blank `Session.agent`) or
+    /// the personality was deleted from the roster, we fall back to
+    /// the roster's default personality.
+    pub async fn resolve_personality(
+        &self,
+    ) -> Result<crate::personalities::AgentPersonality, String> {
+        let id = self.agent.personality_id.trim();
+        let roster = crate::personalities::load_personalities().await?;
+        if !id.is_empty() {
+            if let Some(p) = roster.personalities.iter().find(|p| p.id == id) {
+                return Ok(p.clone());
+            }
+        }
+        // Fall back to the default.
+        roster
+            .personalities
+            .into_iter()
+            .find(|p| p.id == roster.default_personality_id)
+            .ok_or_else(|| "Personalities roster is empty after enforce_invariants".to_string())
     }
 }
 
@@ -398,6 +471,19 @@ pub async fn create_session(
     let dir = ensure_sessions_dir(project_path).await?;
     let now = now_iso();
     let id = Uuid::new_v4().to_string();
+    // Heal a legacy v1 snapshot: if the frontend sent an `id` but
+    // no `personalityId`, lift the legacy `id` into the new field.
+    let agent = match agent {
+        Some(mut a) => {
+            if a.personality_id.trim().is_empty() {
+                if let Some(legacy) = a.id.take() {
+                    a.personality_id = legacy;
+                }
+            }
+            a
+        }
+        None => default_agent_snapshot(),
+    };
     let session = Session {
         version: 2,
         id: id.clone(),
@@ -405,7 +491,7 @@ pub async fn create_session(
         project_path: project_path.to_string(),
         created_at: now.clone(),
         updated_at: now,
-        agent: agent.unwrap_or_else(default_agent_snapshot),
+        agent,
         goal_mode: false,
         action_mode: ActionMode::AskRisky,
         messages: Vec::new(),
@@ -1280,6 +1366,11 @@ mod tests {
         let parsed: Session = serde_json::from_str(from_ts).unwrap();
         assert_eq!(parsed.project_path, "/p");
         assert_eq!(parsed.version, 1); // normalized to 2 on save
-        assert_eq!(parsed.agent.id, "harness"); // defaulted
+        // v1 sessions carried the personality inline as `id`; the v2
+        // deserializer lifts it into `personalityId`. The healing
+        // happens at the `create_session` boundary, so the raw
+        // deserialized value still has `id` set and `personalityId`
+        // empty until first save.
+        assert_eq!(parsed.agent.id.as_deref(), Some("harness"));
     }
 }

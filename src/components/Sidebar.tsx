@@ -241,7 +241,20 @@ function SessionsPanel() {
     setActiveSessionId,
     workspacePath,
     setAgentManagerOpen,
+    personalities,
   } = useStore();
+  // The personality the next "New session" click will use. Initialised
+  // to the roster's default; the user can override per click via the
+  // small dropdown next to the + button. Resets to default whenever
+  // the roster's default changes.
+  const [newSessionPersonalityId, setNewSessionPersonalityId] = useState<
+    string | null
+  >(null);
+  useEffect(() => {
+    if (personalities && !newSessionPersonalityId) {
+      setNewSessionPersonalityId(personalities.defaultPersonalityId);
+    }
+  }, [personalities, newSessionPersonalityId]);
 
   useEffect(() => {
     if (!workspacePath) {
@@ -255,8 +268,17 @@ function SessionsPanel() {
 
   const handleNewSession = async () => {
     if (!workspacePath) return;
+    // The dropdown next to the + button lets the user pick a
+    // personality for the new session. If the roster hasn't loaded
+    // yet, pass `undefined` and let the Rust side default.
+    const personalityId = newSessionPersonalityId ?? undefined;
     try {
-      const created = await ipc.createSession(workspacePath);
+      const created = await ipc.createSession(
+        workspacePath,
+        personalityId
+          ? { personalityId }
+          : undefined,
+      );
       // Insert into the sidebar list and switch to the new session
       // immediately. The activeSessionId watcher in session-manager
       // will then load + apply the empty session, but we also call
@@ -272,7 +294,7 @@ function SessionsPanel() {
         updatedAt: created.updatedAt,
         messageCount: 0,
         title: created.title,
-        agentId: created.agent.id,
+        agentId: created.agent.personalityId || created.agent.id,
       }]);
       setActiveSessionId(created.id);
       // Apply the freshly-created session to the in-memory store so
@@ -314,6 +336,21 @@ function SessionsPanel() {
       grow
       trailing={
         <div className="flex items-center gap-0.5">
+          {workspacePath && personalities && personalities.personalities.length > 1 && (
+            <select
+              value={newSessionPersonalityId ?? personalities.defaultPersonalityId}
+              onChange={(e) => setNewSessionPersonalityId(e.target.value)}
+              className="bg-surface-3 border border-border-subtle rounded text-[10px] text-white-50 outline-none cursor-pointer h-[28px] px-1.5 max-w-[110px] truncate"
+              title="Personality for the next new session"
+              aria-label="Personality for new session"
+            >
+              {personalities.personalities.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          )}
           {workspacePath && (
             <button
               onClick={handleNewSession}

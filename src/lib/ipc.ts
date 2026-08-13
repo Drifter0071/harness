@@ -76,12 +76,20 @@ export interface ToolActivity {
   arguments?: unknown;
 }
 
-/** Snapshot of the agent personality that drives a session. */
+/** Snapshot of the agent personality that drives a session. After the
+ *  global-personalities change, only the `personalityId` is stored
+ *  on the session; the rest of the fields (name, role, system prompt,
+ *  model id) come from the global personality roster at session
+ *  start. Old session files (v1) embedded the full snapshot; the
+ *  legacy `id` field is still read on the TS side so rehydrated
+ *  sessions can match back to a personality. */
 export interface AgentSnapshot {
-  id: string;
-  name: string;
-  role: AgentRole;
-  systemPrompt: string;
+  personalityId: string;
+  /** Legacy v1 field, kept for back-compat when rehydrating. */
+  id?: string;
+  name?: string;
+  role?: AgentRole;
+  systemPrompt?: string;
 }
 
 export interface Session {
@@ -307,20 +315,40 @@ export interface ChatError {
 
 // ── Agent roster + turn loop (agent-sessions spec) ──
 
+/** Default system prompt for a role, as seeded on first contact.
+ *  Mirrors `AgentRole::default_prompt()` on the Rust side. */
+export const DEFAULT_PROMPTS: Record<AgentRole, string> = {
+  Orchestrator:
+    "You are the orchestrator. You coordinate sub-agents, break down goals into tasks, and synthesize results.",
+  Coder: "You are a senior software engineer. You write clean, efficient code and follow best practices.",
+  Architect:
+    "You are a system architect. You design systems, evaluate trade-offs, and create technical specifications.",
+  Researcher:
+    "You are a technical researcher. You gather information, analyze options, and provide well-sourced recommendations.",
+  HealthMonitor:
+    "You are a health monitor. You watch for stalled agents, hallucinated outputs, and loops. You flag issues and suggest corrections.",
+};
+
+/** Global agent personality. The roster is stored at
+ *  `<data_dir>/Harness/personalities.json` and shared across every
+ *  project the user opens. */
 export interface AgentPersonality {
   id: string;
   name: string;
   role: AgentRole;
   systemPrompt: string;
-  /** Builtin personas are editable but cannot be deleted. */
+  /** Saved-model id (`SavedModel.id`) to use when this personality
+   *  runs. `null` means "use the active chat model". */
+  modelId: string | null;
+  /** Builtin personalities are seeded on first contact (one per
+   *  `AgentRole`) and are editable but cannot be deleted. */
   builtin: boolean;
 }
 
-export interface AgentRoster {
+export interface PersonalityRoster {
   version: number;
-  maxAgentsPerSession: number;
-  defaultAgentId: string;
-  agents: AgentPersonality[];
+  defaultPersonalityId: string;
+  personalities: AgentPersonality[];
 }
 
 export interface AgentTurnRequest {
@@ -499,11 +527,15 @@ export const ipc = {
   listFilesRecursive: (projectPath: string) =>
     invoke<string[]>("list_files_recursive", { projectPath }),
 
-  // Agent roster (Agent Manager window)
-  loadAgentRoster: (projectPath: string) =>
-    invoke<AgentRoster>("load_agent_roster", { projectPath }),
-  saveAgentRoster: (projectPath: string, roster: AgentRoster) =>
-    invoke<AgentRoster>("save_agent_roster", { projectPath, roster }),
+  // Global agent personalities (Agent Manager window). The roster
+  // lives at <data_dir>/Harness/personalities.json and is shared
+  // across every project. `getPersonality` falls back to the roster
+  // default on the Rust side when the id is unknown.
+  loadPersonalities: () => invoke<PersonalityRoster>("load_personalities"),
+  savePersonalities: (roster: PersonalityRoster) =>
+    invoke<PersonalityRoster>("save_personalities", { roster }),
+  getPersonality: (id: string) =>
+    invoke<AgentPersonality>("get_personality", { id }),
 
   // Agent turn loop
   runAgentTurn: (req: AgentTurnRequest) =>

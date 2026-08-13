@@ -8,14 +8,37 @@ import { Settings } from "./components/Settings";
 import { Chat } from "./components/Chat";
 import { AgentManager } from "./components/AgentManager";
 import { useStore } from "./lib/store";
+import { ipc } from "./lib/ipc";
 import { useProjectLifecycle, flushPendingSave } from "./lib/session-manager";
 import { useModelBootstrap } from "./lib/model-bootstrap";
 import { ToastHost } from "./lib/toast";
+
+function usePersonalitiesBootstrap() {
+  const setPersonalities = useStore((s) => s.setPersonalities);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const roster = await ipc.loadPersonalities();
+        if (!cancelled) setPersonalities(roster);
+      } catch (err) {
+        // Best-effort: Agent Manager will show a one-time error on open.
+        // The agent loop's `resolve_personality` falls back to the
+        // default if the roster is missing, so sessions keep working.
+        console.error("Failed to load personalities:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [setPersonalities]);
+}
 
 function App() {
   const { settingsOpen, canvasPanels, agentManagerOpen } = useStore();
   useProjectLifecycle();
   useModelBootstrap();
+  usePersonalitiesBootstrap();
 
   useEffect(() => {
     const handler = () => {

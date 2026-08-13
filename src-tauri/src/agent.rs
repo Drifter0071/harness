@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentRole {
     Orchestrator,
     Coder,
@@ -17,6 +17,32 @@ impl AgentRole {
             AgentRole::Architect => "You are a system architect. You design systems, evaluate trade-offs, and create technical specifications.",
             AgentRole::Researcher => "You are a technical researcher. You gather information, analyze options, and provide well-sourced recommendations.",
             AgentRole::HealthMonitor => "You are a health monitor. You watch for stalled agents, hallucinated outputs, and loops. You flag issues and suggest corrections.",
+        }
+    }
+
+    /// All role variants, in the canonical order used by the Agent
+    /// Manager UI. New variants must be appended so existing saved
+    /// personalities keep their numeric index.
+    pub fn all() -> [AgentRole; 5] {
+        [
+            AgentRole::Orchestrator,
+            AgentRole::Coder,
+            AgentRole::Architect,
+            AgentRole::Researcher,
+            AgentRole::HealthMonitor,
+        ]
+    }
+
+    /// Default display name for a builtin personality carrying this
+    /// role. The user can rename the personality in the Agent Manager;
+    /// this is the seed value.
+    pub fn display_name(&self) -> &str {
+        match self {
+            AgentRole::Orchestrator => "Orchestrator",
+            AgentRole::Coder => "Coder",
+            AgentRole::Architect => "Architect",
+            AgentRole::Researcher => "Researcher",
+            AgentRole::HealthMonitor => "Health Monitor",
         }
     }
 }
