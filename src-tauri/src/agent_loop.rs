@@ -297,8 +297,8 @@ fn build_system_prompt(
 fn build_request(
     resolved_model_id: &str,
     system_prompt: String,
-    workspace: &str,
-    goal_mode: bool,
+    _workspace: &str,
+    _goal_mode: bool,
     messages: &[ToolChatMessage],
     reasoning_effort: Option<ReasoningEffort>,
 ) -> ToolChatRequest {
@@ -569,12 +569,13 @@ async fn run_agent_turn_inner(
     let personality = match session.resolve_personality().await {
         Ok(p) => p,
         Err(e) => {
+            let msg = format!("Failed to resolve personality: {}", e);
             sink.emit(
                 "agent-error",
                 json!(ErrorEvent {
                     request_id: &request_id,
                     kind: "internal",
-                    message: format!("Failed to resolve personality: {}", e),
+                    message: &msg,
                 }),
             );
             let _ = in_flight.remove(&request_id);
@@ -862,6 +863,7 @@ async fn run_turn_core(
                     request_id,
                     session,
                     workspace,
+                    &resolved,
                     call,
                     &mut messages,
                     sink,
@@ -1050,6 +1052,7 @@ async fn execute_one(
     request_id: &str,
     session: &mut Session,
     workspace: &str,
+    resolved: &ResolvedAgent,
     call: &ToolCall,
     messages: &mut Vec<ToolChatMessage>,
     sink: &Arc<dyn AgentEventSink>,

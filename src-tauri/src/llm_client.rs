@@ -1145,7 +1145,7 @@ async fn run_openai_tools(
     resolved: &ResolvedModel,
     text_cb: impl Fn(&str),
     reasoning_cb: impl Fn(&str),
-    mut cancel_rx: oneshot::Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
 ) -> Result<TurnOutcome, AgentTurnError> {
     let client = build_client().map_err(AgentTurnError::Internal)?;
     let url = format!("{}/chat/completions", resolved.base_url);

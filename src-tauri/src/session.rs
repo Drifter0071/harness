@@ -154,6 +154,48 @@ impl AgentSnapshot {
     ) -> Self {
         Self::from_personality_id(id)
     }
+
+    /// Stable id for the snapshot, used in the session summary's
+    /// `agent_id` slot. Prefers the legacy `id` field (only present on
+    /// v1 payloads) and falls back to the `personality_id` (always set
+    /// on v2). This keeps the frontend's `session.agent.id` accessor
+    /// non-empty for both shapes.
+    pub fn agent_id(&self) -> String {
+        self.id
+            .clone()
+            .unwrap_or_else(|| self.personality_id.clone())
+    }
+
+    /// Human display name for the snapshot, used in the session list
+    /// and any UI that wants a label without hitting the global roster.
+    /// Falls back to a derived label from the personality id when the
+    /// legacy `name` field is absent (the v2 case).
+    pub fn agent_name(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        // Stable builtin ids look like `builtin-orchestrator`; render
+        // them as `Orchestrator` so the sidebar shows a friendly label
+        // even when the global roster isn't loaded yet.
+        let raw = self.personality_id.clone();
+        if let Some(stripped) = raw.strip_prefix("builtin-") {
+            let mut out = String::new();
+            let mut capitalize = true;
+            for ch in stripped.chars() {
+                if ch == '-' {
+                    capitalize = true;
+                    out.push(' ');
+                } else if capitalize {
+                    out.extend(ch.to_uppercase());
+                    capitalize = false;
+                } else {
+                    out.push(ch);
+                }
+            }
+            return out;
+        }
+        raw
+    }
 }
 
 /// In-band "this turn finished" marker written by the agent loop on the
@@ -416,8 +458,8 @@ fn summarize(s: &Session, project_path: &str) -> SessionSummary {
         updated_at: s.updated_at.clone(),
         message_count: s.messages.len(),
         title: s.title.clone(),
-        agent_id: Some(s.agent.id.clone()),
-        agent_name: Some(s.agent.name.clone()),
+        agent_id: Some(s.agent.agent_id()),
+        agent_name: Some(s.agent.agent_name()),
     }
 }
 
