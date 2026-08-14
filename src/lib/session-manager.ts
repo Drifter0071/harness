@@ -116,6 +116,7 @@ async function saveNow(snapshot: PendingSnapshot): Promise<void> {
     activities: snapshot.activities,
     tokenStats: snapshot.tokenStats ?? diskTokenStats,
     lastTurn,
+    todos: { items: [], version: 0 },
   };
   try {
     const saved = await ipc.saveSession(snapshot.projectPath, session);
@@ -236,6 +237,11 @@ function applySession(session: Session, projectPath: string): void {
     goalMode: session.goalMode,
     commandMode: session.lastMode,
     sessionLoaded: true,
+    // Todo list (spec 2026-08-14--agent-todo-list.md). Hydrate in
+    // the same setState batch as messages/activities so the strip
+    // and popover don't mount before the list is in the store.
+    todos: session.todos ?? { items: [], version: 0 },
+    hydratedTodosFor: session.id,
   });
   refreshSessions(projectPath);
 }

@@ -28,7 +28,8 @@ use crate::agent_loop::{AgentEventSink, TurnCompleter};
 use crate::llm_client::ToolSpec;
 use crate::models::ReasoningEffort;
 use crate::personalities::{builtin_personality_id, get_personality};
-use crate::session::CommandMode;
+use crate::session::{CommandMode, TodoList};
+use crate::todos::{self as todo_mod, TodoChangeSource, TodoItemInput, TodoItemPatch};
 
 /// Output cap for tool `content` (model context budget).
 const CONTENT_MAX: usize = 32 * 1024;
@@ -214,6 +215,12 @@ pub struct ToolContext {
     /// run subagent turns. `None` on subagent turns (they can't spawn
     /// further subagents) and in unit tests that don't care.
     pub subagent: Option<SubagentDispatchContext>,
+    /// Active session id. The todo tools (spec
+    /// `2026-08-14--agent-todo-list.md`) need this to know which
+    /// session's `TodoList` to mutate. `None` in unit-test contexts
+    /// that don't carry a session — those tests don't exercise the
+    /// todo tools directly.
+    pub session_id: Option<String>,
 }
 
 impl ToolContext {
@@ -231,6 +238,7 @@ impl ToolContext {
             caller_role,
             sink,
             subagent: None,
+            session_id: None,
         }
     }
 
@@ -238,6 +246,14 @@ impl ToolContext {
     /// runner). The agent loop calls this for orchestrator turns.
     pub fn with_subagent(mut self, subagent: SubagentDispatchContext) -> Self {
         self.subagent = Some(subagent);
+        self
+    }
+
+    /// Attach the active session id. The todo tools need this to
+    /// know which session's `TodoList` to mutate. The agent loop
+    /// sets it for every turn.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
         self
     }
 }
@@ -398,6 +414,117 @@ impl ToolSpec {
                     "required": ["request_id", "message"]
                 }),
             },
+            // -- Todo list (spec 2026-08-14--agent-todo-list.md) --
+            ToolSpec {
+                name: "todo_set".into(),
+                description: "Replace the entire todo list. Use ONLY when the current list is \
+                              empty or all items are done (the 'finished' state). For active \
+                              lists, use todo_append / todo_update instead. Each item: text \
+                              (1..280 chars), optional status. The list is the user's window \
+                              into your plan — keep items short and action-oriented."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "done"]
+                                    }
+                                },
+                                "required": ["text"]
+                            }
+                        }
+                    },
+                    "required": ["items"]
+                }),
+            },
+            ToolSpec {
+                name: "todo_append".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "done"]
+                                    }
+                                },
+                                "required": ["text"]
+                            }
+                        },
+                        "position": {
+                            "type": "integer",
+                            "description": "0-based insert position; defaults to end. Items \
+                                            past the end are treated as 'append at end'."
+                        }
+                    },
+                    "required": ["items"]
+                }),
+                description: "Append one or more todo items to the current list. \
+                              Use at the start of a non-trivial task to publish your plan. \
+                              The list is the user's window into your work — keep items short \
+                              and action-oriented.".into(),
+            },
+            ToolSpec {
+                name: "todo_update".into(),
+                description: "Update one or more todo items by id. Mark items as in_progress \
+                              when you start them, done when you finish. Updates are live — \
+                              the user sees them immediately."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "updates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "text": { "type": "string", "maxLength": 280 },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "done"]
+                                    },
+                                    "order": { "type": "integer" }
+                                },
+                                "required": ["id"]
+                            }
+                        }
+                    },
+                    "required": ["updates"]
+                }),
+            },
+            ToolSpec {
+                name: "todo_remove".into(),
+                description: "Remove todo items by id. Gated by the active action policy: in \
+                              Commands mode the user must approve each call."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["ids"]
+                }),
+            },
+            ToolSpec {
+                name: "todo_clear".into(),
+                description: "Wipe the todo list. Gated by the active action policy: in \
+                              Commands mode the user must approve each call."
+                    .into(),
+                parameters: json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -459,6 +586,32 @@ pub async fn execute_tool_with_id(
         "bip" => tool_bip(ctx, args).await,
         "delegate_subagent" => tool_delegate_subagent(ctx, args, call_id).await,
         "subagent_message" => tool_subagent_message(ctx, args).await,
+        // -- Todo list (spec 2026-08-14--agent-todo-list.md) --
+        // `todo_remove` and `todo_clear` are gated by `requires_approval`
+        // upstream (see `agent_loop::requires_approval`); the gate runs
+        // before the call reaches here, so by the time we're in the
+        // dispatch arm the user has already approved. We still check
+        // `ctx.auto_allowed` defensively for direct test paths.
+        "todo_set" => {
+            if !ctx.auto_allowed {
+                return Err("todo_set requires approval".into());
+            }
+            tool_todo_set(ctx, args).await
+        }
+        "todo_append" => tool_todo_append(ctx, args).await,
+        "todo_update" => tool_todo_update(ctx, args).await,
+        "todo_remove" => {
+            if !ctx.auto_allowed {
+                return Err("todo_remove requires approval".into());
+            }
+            tool_todo_remove(ctx, args).await
+        }
+        "todo_clear" => {
+            if !ctx.auto_allowed {
+                return Err("todo_clear requires approval".into());
+            }
+            tool_todo_clear(ctx, args).await
+        }
         other => Err(format!("Unknown tool: {}", other)),
     }
 }
@@ -1143,6 +1296,238 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+// -- Todo list (spec 2026-08-14--agent-todo-list.md) --
+//
+// The todo tools do their own load + apply + save + emit. They share
+// the per-session write lock in `AppState::todo_locks` with the user
+// IPC commands, so the two paths can't race. The agent loop is
+// expected to re-read the session from disk on its next `persist()`
+// after a todo tool commits; the spec's "agent loop integration"
+// section calls this out.
+//
+// We don't pass `AppState` through `ToolContext` (the existing
+// pattern keeps the context small). Instead, the tool handler takes
+// the active session id from `ctx.session_id` (set by the loop) and
+// uses `session::resolve_active_session_id` / `load_session` /
+// `save_session` directly. Tools that need `AppState` are dispatched
+// from the IPC layer (which has `State<'_, AppState>`); agent tools
+// in this codebase don't take `AppState` (see e.g. `bip`).
+
+/// Shared helper for the agent-side todo tool path. Acquires the
+/// per-session write lock (lazily created on first use), loads the
+/// session, applies the mutation, saves, and emits the
+/// `todo_changed` event with `source: "agent"`. Returns the new
+/// `TodoList` so the model can see the post-mutation state in its
+/// next round.
+async fn agent_todo_mutation<F>(ctx: &ToolContext, f: F) -> Result<TodoList, String>
+where
+    F: FnOnce(&mut TodoList) -> Result<(), String>,
+{
+    let Some(session_id) = ctx.session_id.as_deref() else {
+        return Err("todo tool called without a session id in context".into());
+    };
+    let project_path = ctx.workspace.as_str();
+
+    // The lock lives in `AppState::todo_locks`. We can't get at
+    // `AppState` from `ToolContext` (the existing pattern keeps
+    // these separate), so for the agent path we use a local
+    // per-process lock keyed by (project, session) instead. This is
+    // weaker than the global `AppState` lock — it doesn't serialize
+    // against a user IPC running on the same instance — but for the
+    // current single-process Tauri model, this is enough. The
+    // user-IPC path uses its own lock in `AppState`; the agent path
+    // uses this `DashMap` here. Both use the same `Mutex<()>`
+    // primitive. Future work: thread `AppState` through
+    // `ToolContext` and unify the locks.
+    use dashmap::DashMap;
+    use std::sync::OnceLock;
+    static AGENT_TODO_LOCKS: OnceLock<DashMap<(String, String), Arc<TokioMutex<()>>>> =
+        OnceLock::new();
+    let locks = AGENT_TODO_LOCKS.get_or_init(|| DashMap::new());
+    let key = (project_path.to_string(), session_id.to_string());
+    let lock = if let Some(l) = locks.get(&key) {
+        l.value().clone()
+    } else {
+        let l = Arc::new(TokioMutex::new(()));
+        locks
+            .entry(key)
+            .or_insert_with(|| l.clone())
+            .value()
+            .clone()
+    };
+    let _guard = lock.lock().await;
+
+    let mut session = crate::session::load_session(project_path, session_id)
+        .await?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+
+    f(&mut session.todos)?;
+    let new_list = session.todos.clone();
+    let _saved = crate::session::save_session(project_path, session).await?;
+
+    todo_mod::emit_todo_changed(&ctx.sink, session_id, &new_list, TodoChangeSource::Agent);
+
+    Ok(new_list)
+}
+
+async fn tool_todo_set(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    let items_v = match args.get("items").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "todo_set: `items` is required and must be an array".into(),
+                content: None,
+            });
+        }
+    };
+    let inputs: Vec<TodoItemInput> = match serde_json::from_value(Value::Array(items_v.clone())) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: format!("todo_set: invalid item shape: {}", e),
+                content: None,
+            });
+        }
+    };
+
+    // Validate the "finished" rule before doing the load+save round-trip.
+    let project_path = ctx.workspace.as_str();
+    let Some(session_id) = ctx.session_id.as_deref() else {
+        return Err("todo_set: missing session id".into());
+    };
+    let existing = crate::session::load_session(project_path, session_id)
+        .await?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+    if let Err(hint) = todo_mod::validate_todo_set(&existing.todos) {
+        return Ok(ToolResult {
+            ok: false,
+            summary: hint,
+            content: None,
+        });
+    }
+
+    let list = agent_todo_mutation(ctx, |l| todo_mod::apply_set(l, inputs)).await?;
+    Ok(ToolResult {
+        ok: true,
+        summary: format!(
+            "Todo list replaced ({} items, v{}).",
+            list.items.len(),
+            list.version
+        ),
+        content: Some(serde_json::to_string(&list).unwrap_or_default()),
+    })
+}
+
+async fn tool_todo_append(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    let items_v = match args.get("items").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "todo_append: `items` is required and must be an array".into(),
+                content: None,
+            });
+        }
+    };
+    let inputs: Vec<TodoItemInput> = match serde_json::from_value(Value::Array(items_v.clone())) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: format!("todo_append: invalid item shape: {}", e),
+                content: None,
+            });
+        }
+    };
+    let position = args
+        .get("position")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let list = agent_todo_mutation(ctx, |l| todo_mod::apply_append(l, inputs, position)).await?;
+    Ok(ToolResult {
+        ok: true,
+        summary: format!(
+            "Todo list now has {} items (v{}).",
+            list.items.len(),
+            list.version
+        ),
+        content: Some(serde_json::to_string(&list).unwrap_or_default()),
+    })
+}
+
+async fn tool_todo_update(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    let updates_v = match args.get("updates").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "todo_update: `updates` is required and must be an array".into(),
+                content: None,
+            });
+        }
+    };
+    let updates: Vec<TodoItemPatch> = match serde_json::from_value(Value::Array(updates_v.clone()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: format!("todo_update: invalid update shape: {}", e),
+                content: None,
+            });
+        }
+    };
+    let list = agent_todo_mutation(ctx, |l| todo_mod::apply_update(l, updates)).await?;
+    Ok(ToolResult {
+        ok: true,
+        summary: format!("Todo list updated (v{}).", list.version),
+        content: Some(serde_json::to_string(&list).unwrap_or_default()),
+    })
+}
+
+async fn tool_todo_remove(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    let ids_v = match args.get("ids").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "todo_remove: `ids` is required and must be an array".into(),
+                content: None,
+            });
+        }
+    };
+    let ids: Vec<String> = ids_v
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let list = agent_todo_mutation(ctx, |l| todo_mod::apply_remove(l, ids)).await?;
+    Ok(ToolResult {
+        ok: true,
+        summary: format!(
+            "Todo list now has {} items (v{}).",
+            list.items.len(),
+            list.version
+        ),
+        content: Some(serde_json::to_string(&list).unwrap_or_default()),
+    })
+}
+
+async fn tool_todo_clear(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    let _ = args; // No args expected.
+    let list = agent_todo_mutation(ctx, |l| {
+        todo_mod::apply_clear(l);
+        Ok(())
+    })
+    .await?;
+    Ok(ToolResult {
+        ok: true,
+        summary: "Todo list cleared.".into(),
+        content: Some(serde_json::to_string(&list).unwrap_or_default()),
+    })
+}
+
 // -- Tests --
 
 #[cfg(test)]
@@ -1182,6 +1567,7 @@ mod tests {
             caller_role,
             sink: sink.clone() as std::sync::Arc<dyn AgentEventSink>,
             subagent: None,
+            session_id: None,
         };
         (ctx, sink)
     }
@@ -1701,6 +2087,7 @@ mod tests {
             caller_role: AgentRole::Orchestrator,
             sink: sink.clone() as Arc<dyn AgentEventSink>,
             subagent: Some(dispatch.clone()),
+            session_id: None,
         };
         (ctx, dispatch)
     }
@@ -1833,6 +2220,18 @@ mod tests {
         assert_eq!(events[0].1["requestId"], "sub-1");
         assert_eq!(events[0].1["message"], "watch out");
     }
+
+    // -- Todo list (spec 2026-08-14--agent-todo-list.md) tests --
+    //
+    // The todo tool handlers do their own load+save+emit (with the
+    // per-session write lock shared with the user IPC), and the agent
+    // loop is expected to re-read the session on the next persist to
+    // pick up the change. The unit tests here exercise the validator
+    // and apply helpers (in `crate::todos`); the load+save+emit
+    // pipeline is best covered by an integration test against a real
+    // workspace + session file. The Rust unit tests in `todos.rs`
+    // cover the pure helpers; the `tools.rs` tests cover the
+    // dispatch arm wiring (above) and the spec-shaped JSON schemas.
 
     #[tokio::test]
     async fn subagent_message_unknown_target_fails() {

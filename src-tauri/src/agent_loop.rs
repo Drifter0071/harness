@@ -33,7 +33,7 @@ use crate::models::ReasoningEffort;
 use crate::personalities::AgentPersonality;
 use crate::secrets::SecretStore;
 use crate::session::{
-    save_session, CommandMode, LastTurn, Message, Session, TokenStats, ToolActivity,
+    save_session, CommandMode, LastTurn, Message, Session, TodoList, TokenStats, ToolActivity,
     ToolActivityStatus,
 };
 use crate::tools::{execute_tool_with_id, SubagentDispatchContext, ToolContext, ToolResult};
@@ -301,7 +301,15 @@ impl Drop for PendingApprovalGuard {
 
 fn requires_approval(mode: &CommandMode, name: &str) -> bool {
     match mode {
-        CommandMode::Commands => name == "run_command",
+        CommandMode::Commands => {
+            // `run_command` is the canonical shell-exec gate.
+            // `todo_remove` / `todo_clear` are destructive in the
+            // sense that they wipe items the user may have edited;
+            // surface them for approval in Commands mode so the
+            // user sees what's being changed. (Spec
+            // 2026-08-14--agent-todo-list.md §2.)
+            name == "run_command" || name == "todo_remove" || name == "todo_clear"
+        }
         CommandMode::Yolo => false,
     }
 }
@@ -340,7 +348,12 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
         .collect()
 }
 
-fn build_system_prompt(orchestrator_prompt: &str, workspace: &str, goal_mode: bool) -> String {
+fn build_system_prompt(
+    orchestrator_prompt: &str,
+    workspace: &str,
+    goal_mode: bool,
+    todos: &crate::session::TodoList,
+) -> String {
     let mut prompt = orchestrator_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
@@ -357,7 +370,41 @@ fn build_system_prompt(orchestrator_prompt: &str, workspace: &str, goal_mode: bo
             CONTINUE_MARKER
         ));
     }
+    // Todo list (spec 2026-08-14--agent-todo-list.md). Injected as
+    // a compact block in the system message so the model sees the
+    // current plan on every turn but it isn't treated as fresh user
+    // input. Empty list → no block, no noise.
+    if !todos.items.is_empty() {
+        let done = todos
+            .items
+            .iter()
+            .filter(|i| i.status == crate::session::TodoStatus::Done)
+            .count();
+        prompt.push_str(&format!(
+            "\n\n[Plan: {}/{} done]\n{}",
+            done,
+            todos.items.len(),
+            format_todo_block(&todos.items),
+        ));
+    }
     prompt
+}
+
+/// Render a todo list as the compact block the LLM sees each turn.
+/// Each item is one line: a marker (✓ done, → in_progress, ⏵
+/// pending) + the item text. Stable so model diffs over multiple
+/// turns don't trip on formatting churn.
+fn format_todo_block(items: &[crate::session::TodoItem]) -> String {
+    let mut out = String::new();
+    for item in items {
+        let marker = match item.status {
+            crate::session::TodoStatus::Done => "✓",
+            crate::session::TodoStatus::InProgress => "→",
+            crate::session::TodoStatus::Pending => "⏵",
+        };
+        out.push_str(&format!("  {} {}\n", marker, item.text));
+    }
+    out
 }
 
 fn build_request(
@@ -854,6 +901,7 @@ async fn run_subagent_turn_inner(
         last_turn: None,
         compact: None,
         compact_threshold: 0.8,
+        todos: TodoList::default(),
     };
 
     let outcome = run_turn_core(
@@ -995,7 +1043,12 @@ async fn run_turn_core(
         }
 
         // -- Provider call, raced against cancellation --
-        let system_prompt = build_system_prompt(&resolved.system_prompt, workspace, goal_mode);
+        let system_prompt = build_system_prompt(
+            &resolved.system_prompt,
+            workspace,
+            goal_mode,
+            &session.todos,
+        );
         let request = build_request(
             &resolved.model_id,
             system_prompt,
@@ -1340,6 +1393,9 @@ async fn execute_one(
     if let Some(d) = dispatch {
         ctx = ctx.with_subagent(d.clone());
     }
+    // Todo tools (spec 2026-08-14--agent-todo-list.md) need the
+    // active session id to know which session's TodoList to mutate.
+    ctx = ctx.with_session_id(session.id.clone());
     let result = match execute_tool_with_id(&ctx, &call.name, &call.arguments, &call.id).await {
         Ok(r) => r,
         Err(e) => ToolResult {
@@ -1918,6 +1974,7 @@ mod tests {
             last_turn: None,
             compact: None,
             compact_threshold: 0.8,
+            todos: TodoList::default(),
         }
     }
 

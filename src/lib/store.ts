@@ -347,6 +347,17 @@ interface HarnessState {
   /** Measured height of the chat header strip (px); the sidebar anchors below it. */
   chatHeaderHeight: number;
   setChatHeaderHeight: (height: number) => void;
+
+  // Todo list (spec 2026-08-14--agent-todo-list.md). Mirrored from
+  // the session; updated by `setTodos` (hydrate) and the
+  // `todo_changed` event (live). `setTodos` is also used by the
+  // optimistic-update path on user IPC edits.
+  todos: import("./ipc").TodoList;
+  /** Session id the todos slice was last hydrated for. Used to skip
+   *  re-hydration when the same session is re-loaded. */
+  hydratedTodosFor: string | null;
+  setTodos: (list: import("./ipc").TodoList) => void;
+  setHydratedTodosFor: (sessionId: string | null) => void;
 }
 
 // ── Store implementation ──
@@ -649,4 +660,10 @@ export const useStore = create<HarnessState>((set) => ({
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   chatHeaderHeight: 0,
   setChatHeaderHeight: (height) => set({ chatHeaderHeight: height }),
+
+  // Todo list (spec 2026-08-14--agent-todo-list.md)
+  todos: { items: [], version: 0 },
+  hydratedTodosFor: null,
+  setTodos: (list) => set({ todos: list }),
+  setHydratedTodosFor: (sessionId) => set({ hydratedTodosFor: sessionId }),
 }));

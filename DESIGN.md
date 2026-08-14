@@ -243,6 +243,54 @@ reads as a single row. The offset is paired with `TITLEBAR_HEIGHT` in
 
 ## Component patterns
 
+### Plan (todo list) — `PlanStrip.tsx` + `PlanPopover.tsx`
+
+The session-scoped todo list (spec `2026-08-14--agent-todo-list.md`).
+The agent's plan, visible to the user at the top of the chat as a
+compact menu.
+
+- **Layout.** `PlanStrip` lives in the ChatHeader row, rendered as a
+  third centered row beneath the existing model/tokens/usage cluster
+  + progress bar (row 1) and the conditional cumulative/session-
+  window row (row 2). Hidden entirely when `items.length === 0`.
+- **Strip (rest).** `glass-mist` pill, `--m-radius: 999px`,
+  `text-[11px] text-white-50 font-medium gap-1.5`. Content: `Plan`
+  wordmark (section-label recipe) + progress fraction `n/m` in
+  `text-white` + `next: <text>` in `text-white-30` (or `· done` in
+  `text-status-active` when the list is finished) + chevron
+  (`ChevronDown` 12px). All animations respect
+  `prefers-reduced-motion`.
+- **Popover (hover/focus).** Portaled to `<body>` at `z-[85]` (just
+  under Bip's thought popover at `z-[90]`). Anchored 12px below
+  the strip, 320px wide, max-height 360px (internal scroll for
+  >10 items). Uses the same shared-hover state trick as Bip's
+  thought popover so the 8px gap doesn't close the popover
+  mid-read. `Esc` and outside-click close.
+- **Items.** 32px row, `px-3 hover:bg-white/[0.04]`. Status pill
+  (24×24 left, clickable, cycles `pending → in_progress → done`),
+  text (`text-[13px] text-white` for pending/in_progress,
+  `text-white-30 line-through` for done; click → contenteditable
+  for inline rename, `Enter` commits, `Esc` reverts, blur commits,
+  empty text on commit = delete), hover affordances on the right
+  (`GripVertical` for drag, `X` for delete).
+- **`+ Add step` row** at the bottom: `Plus` icon + `text-white-30
+  text-[12px]`. Click → inline input (same recipe as item text),
+  `Enter` commits.
+- **Footer.** `Clear plan` button (`text-white-15 text-[11px]`,
+  hover `text-status-error`).
+- **Drag-reorder.** Native HTML5 drag. `order` values are sparse
+  step-1000 so future inserts between items don't require full
+  re-numbering.
+- **"All done" transition.** When `isFinished(list) === true`, the
+  strip flips to `Plan · done` in `text-status-active` and the
+  popover header gets a 2px `status.active` left rule. The
+  transition only fires on the *transition* from non-finished to
+  finished; loading a session that was already finished does not
+  re-trigger it.
+- **Drag region.** The strip sits in the ChatHeader row, outside
+  the title bar's `data-tauri-drag-region` strip — no opt-out
+  needed.
+
 ### Chat message (`Chat.tsx`)
 
 - **User:** right-aligned, `bg-surface-3`, `rounded-2xl rounded-br-sm`,

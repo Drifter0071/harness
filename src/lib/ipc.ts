@@ -137,6 +137,35 @@ export interface Session {
      *  events never reach the WebView. */
     reasoning?: string;
   } | null;
+  /** Session-scoped todo list (spec 2026-08-14--agent-todo-list.md).
+   *  The agent's plan, visible to the user at the top of the chat.
+   *  `todos.items.length === 0` and the strip is hidden. */
+  todos: TodoList;
+}
+
+// ── Todo list (spec 2026-08-14--agent-todo-list.md) ──
+
+export type TodoStatus = "pending" | "in_progress" | "done";
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  status: TodoStatus;
+  order: number;
+}
+
+export interface TodoList {
+  items: TodoItem[];
+  version: number;
+}
+
+export type TodoChangeSource = "agent" | "user";
+
+/** Payload of the `todo_changed` Tauri event. */
+export interface TodoChangedEvent {
+  sessionId: string;
+  list: TodoList;
+  source: TodoChangeSource;
 }
 
 export interface RecentProject {
@@ -667,6 +696,26 @@ export const ipc = {
   // into tiled windows; live content still streams via the `agent-*`
   // events keyed by the same `sub-<uuid>` request id.
   listSubagents: () => invoke<SubagentRecord[]>("list_subagents"),
+
+  // Todo list (spec 2026-08-14--agent-todo-list.md). User-initiated
+  // edits; the four commands return the updated TodoList. Agent-side
+  // mutations go through the `todo_changed` event, not these.
+  editTodo: (
+    projectPath: string,
+    sessionId: string,
+    args: { id: string; text?: string; status?: TodoStatus; order?: number },
+  ) => invoke<TodoList>("edit_todo", { projectPath, sessionId, ...args }),
+  appendTodo: (
+    projectPath: string,
+    sessionId: string,
+    items: { text: string; status?: TodoStatus }[],
+    position?: number,
+  ) =>
+    invoke<TodoList>("append_todo", { projectPath, sessionId, items, position }),
+  removeTodo: (projectPath: string, sessionId: string, ids: string[]) =>
+    invoke<TodoList>("remove_todo", { projectPath, sessionId, ids }),
+  clearTodo: (projectPath: string, sessionId: string) =>
+    invoke<TodoList>("clear_todo", { projectPath, sessionId }),
 };
 
 // ── Chat streaming events (Rust → TS) ──
@@ -713,4 +762,9 @@ export const agentEvents = {
    *  round-trip. */
   onSubagentMessage: (fn: (e: SubagentMessage) => void) =>
     listen<SubagentMessage>("subagent-message", (e) => fn(e.payload)),
+  /** Todo list change (spec 2026-08-14--agent-todo-list.md).
+   *  Emitted after every commit from either the agent tool path
+   *  (`source: "agent"`) or a user IPC (`source: "user"`). */
+  onTodoChanged: (fn: (e: TodoChangedEvent) => void) =>
+    listen<TodoChangedEvent>("todo_changed", (e) => fn(e.payload)),
 };
