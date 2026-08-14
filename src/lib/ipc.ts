@@ -376,7 +376,22 @@ export interface PersonalityRoster {
   version: number;
   defaultPersonalityId: string;
   personalities: AgentPersonality[];
+  /** Max number of subagent turns the Orchestrator may run in parallel
+   *  in a single LLM round (spec
+   *  `2026-08-14--parallel-subagent-dispatch`). Default 4, range 1..=16. */
+  maxConcurrentSubagents: number;
+  /** Max number of `[continue]`-driven LLM rounds a goal-mode
+   *  subagent turn may take before being capped. Default 8,
+   *  range 1..=32. */
+  goalMaxTurns: number;
 }
+
+/** Bounds for the Orchestrator's parallel-dispatch knobs. Mirrors the
+ *  Rust constants in `personalities.rs` — keep in sync. */
+export const PARALLEL_KNOB_BOUNDS = {
+  maxConcurrentSubagents: { min: 1, max: 16, default: 4 },
+  goalMaxTurns: { min: 1, max: 32, default: 8 },
+} as const;
 
 export interface AgentTurnRequest {
   requestId: string;

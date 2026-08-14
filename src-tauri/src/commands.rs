@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -530,6 +531,13 @@ pub async fn run_agent_turn(
     // registry, inboxes, and the runner. This is what lets the
     // `delegate_subagent` / `subagent_message` tools work from inside
     // the agent loop.
+    //
+    // The goal-mode continuation cap is read from the global personality
+    // roster (spec `2026-08-14--parallel-subagent-dispatch`); the
+    // roster's `enforce_invariants` clamps the value into range, so a
+    // corrupt or out-of-range file falls back to the documented default
+    // rather than aborting the turn.
+    let roster = crate::personalities::load_personalities().await?;
     let dispatch = crate::tools::SubagentDispatchContext {
         subagents: state.subagents.clone(),
         inbox: state.subagent_inbox.clone(),
@@ -542,6 +550,12 @@ pub async fn run_agent_turn(
         reasoning_effort,
         chat_model_id: model_id.clone(),
         request_id: request_id.clone(),
+        goal_max_turns: roster.goal_max_turns,
+        subagent_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            roster.max_concurrent_subagents as usize,
+        )),
+        dispatch_call_index: Arc::new(DashMap::new()),
+        subagent_cancel: Arc::new(DashMap::new()),
     };
 
     crate::agent_loop::run_agent_turn(

@@ -28,9 +28,28 @@ use tokio::fs;
 
 use crate::agent::AgentRole;
 
-const ROSTER_VERSION: u32 = 2;
+const ROSTER_VERSION: u32 = 3;
 const MIN_PERSONALITIES: usize = 1;
 const BUILTIN_PREFIX: &str = "builtin-";
+
+/// Defaults and bounds for the orchestrator's parallel subagent dispatch
+/// knobs (spec `2026-08-14--parallel-subagent-dispatch`).
+pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: u8 = 4;
+pub const MIN_MAX_CONCURRENT_SUBAGENTS: u8 = 1;
+pub const MAX_MAX_CONCURRENT_SUBAGENTS: u8 = 16;
+pub const DEFAULT_GOAL_MAX_TURNS: usize = 8;
+pub const MIN_GOAL_MAX_TURNS: usize = 1;
+pub const MAX_GOAL_MAX_TURNS: usize = 32;
+
+/// Clamp a user-supplied `max_concurrent_subagents` into the valid range.
+pub fn clamp_max_concurrent_subagents(v: u8) -> u8 {
+    v.clamp(MIN_MAX_CONCURRENT_SUBAGENTS, MAX_MAX_CONCURRENT_SUBAGENTS)
+}
+
+/// Clamp a user-supplied `goal_max_turns` into the valid range.
+pub fn clamp_goal_max_turns(v: usize) -> usize {
+    v.clamp(MIN_GOAL_MAX_TURNS, MAX_GOAL_MAX_TURNS)
+}
 
 /// Builtin personality id for a given subagent role. Stable across
 /// versions. The Orchestrator role is NOT valid here — it's the chat
@@ -46,6 +65,7 @@ pub fn builtin_personality_id(role: AgentRole) -> String {
         AgentRole::Architect => "architect",
         AgentRole::Researcher => "researcher",
         AgentRole::HealthMonitor => "health-monitor",
+        AgentRole::Reviewer => "reviewer",
         AgentRole::Orchestrator => unreachable!("guarded by assert above"),
     };
     format!("{BUILTIN_PREFIX}{slug}")
@@ -78,6 +98,26 @@ pub struct PersonalityRoster {
     /// missing personality.
     pub default_personality_id: String,
     pub personalities: Vec<AgentPersonality>,
+    /// Max number of subagent turns the Orchestrator may run in
+    /// parallel when a single LLM round emits multiple
+    /// `delegate_subagent` tool calls. Excess dispatches queue and
+    /// start as permits free. Default 4, range 1..=16.
+    #[serde(default = "default_max_concurrent_subagents")]
+    pub max_concurrent_subagents: u8,
+    /// Max number of `[continue]`-driven LLM rounds a goal-mode
+    /// subagent turn may take before being capped. Replaces the
+    /// `GOAL_MAX_TURNS` code constant (spec
+    /// `2026-08-14--parallel-subagent-dispatch`). Default 8, range
+    /// 1..=32.
+    #[serde(default = "default_goal_max_turns")]
+    pub goal_max_turns: usize,
+}
+
+fn default_max_concurrent_subagents() -> u8 {
+    DEFAULT_MAX_CONCURRENT_SUBAGENTS
+}
+fn default_goal_max_turns() -> usize {
+    DEFAULT_GOAL_MAX_TURNS
 }
 
 fn default_personalities() -> Vec<AgentPersonality> {
@@ -103,6 +143,8 @@ impl Default for PersonalityRoster {
             version: ROSTER_VERSION,
             default_personality_id: personalities[0].id.clone(),
             personalities,
+            max_concurrent_subagents: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            goal_max_turns: DEFAULT_GOAL_MAX_TURNS,
         }
     }
 }
@@ -233,6 +275,12 @@ fn enforce_invariants(roster: &mut PersonalityRoster) {
     {
         roster.default_personality_id = roster.personalities[0].id.clone();
     }
+    // Clamp the orchestrator knobs to their documented ranges. Older
+    // rosters (v1, v2) loaded from disk land here without the fields, and
+    // serde fills them with the defaults before this runs.
+    roster.max_concurrent_subagents =
+        clamp_max_concurrent_subagents(roster.max_concurrent_subagents);
+    roster.goal_max_turns = clamp_goal_max_turns(roster.goal_max_turns);
 }
 
 #[cfg(test)]
@@ -280,7 +328,7 @@ mod tests {
     async fn default_roster_seeds_all_four_subagent_roles() {
         let _g = DataDirGuard::new();
         let roster = load_personalities().await.unwrap();
-        assert_eq!(roster.version, 2);
+        assert_eq!(roster.version, 3);
         // Every subagent role is present.
         for role in AgentRole::subagent_roles() {
             assert!(
@@ -434,5 +482,77 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    // -- Roster v3 knobs (spec 2026-08-14--parallel-subagent-dispatch) --
+
+    #[tokio::test]
+    async fn default_roster_has_parallel_knobs() {
+        let _g = DataDirGuard::new();
+        let roster = load_personalities().await.unwrap();
+        assert_eq!(
+            roster.max_concurrent_subagents,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS
+        );
+        assert_eq!(roster.goal_max_turns, DEFAULT_GOAL_MAX_TURNS);
+    }
+
+    #[tokio::test]
+    async fn parallel_knobs_roundtrip_through_save() {
+        let _g = DataDirGuard::new();
+        let mut roster = PersonalityRoster::default();
+        roster.max_concurrent_subagents = 8;
+        roster.goal_max_turns = 16;
+        let saved = save_personalities(&roster).await.unwrap();
+        assert_eq!(saved.max_concurrent_subagents, 8);
+        assert_eq!(saved.goal_max_turns, 16);
+
+        let loaded = load_personalities().await.unwrap();
+        assert_eq!(loaded.max_concurrent_subagents, 8);
+        assert_eq!(loaded.goal_max_turns, 16);
+    }
+
+    #[tokio::test]
+    async fn parallel_knobs_clamps_out_of_range() {
+        let _g = DataDirGuard::new();
+        let mut roster = PersonalityRoster::default();
+        roster.max_concurrent_subagents = 99;
+        roster.goal_max_turns = 0;
+        let saved = save_personalities(&roster).await.unwrap();
+        assert_eq!(saved.max_concurrent_subagents, MAX_MAX_CONCURRENT_SUBAGENTS);
+        assert_eq!(saved.goal_max_turns, MIN_GOAL_MAX_TURNS);
+    }
+
+    #[tokio::test]
+    async fn v2_roster_loads_with_default_knobs() {
+        // Older rosters (pre-v3) don't have the new fields. Serde fills
+        // them with the documented defaults, and enforce_invariants
+        // pins the version to 3.
+        let _g = DataDirGuard::new();
+        let p = overridden_path().unwrap();
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let v2 = serde_json::json!({
+            "version": 2,
+            "defaultPersonalityId": "builtin-coder",
+            "personalities": [{
+                "id": "builtin-coder",
+                "name": "Coder",
+                "role": "Coder",
+                "systemPrompt": "old prompt",
+                "modelId": null,
+                "builtin": true,
+            }]
+        });
+        std::fs::write(&p, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
+
+        let loaded = load_personalities().await.unwrap();
+        assert_eq!(loaded.version, 3);
+        assert_eq!(
+            loaded.max_concurrent_subagents,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS
+        );
+        assert_eq!(loaded.goal_max_turns, DEFAULT_GOAL_MAX_TURNS);
     }
 }

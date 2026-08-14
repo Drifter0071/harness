@@ -1,8 +1,8 @@
 mod agent;
 mod agent_loop;
 mod capabilities;
-mod compact;
 mod commands;
+mod compact;
 mod hci;
 mod health_agent;
 mod llm_client;

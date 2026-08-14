@@ -6,6 +6,7 @@ import { Settings } from "./components/Settings";
 import { Chat } from "./components/Chat";
 import { AgentManager } from "./components/AgentManager";
 import { WindowManager } from "./components/WindowManager";
+import { BatchApprovalCard } from "./components/BatchApprovalCard";
 import { useStore } from "./lib/store";
 import { ipc } from "./lib/ipc";
 import {
@@ -111,12 +112,20 @@ function App() {
             <Chat />
           </div>
           {/* Subagent region (right). Empty until the first
-           *  subagent spawns; the equal-grid tiles own the rest. */}
+           *  subagent spawns; the equal-grid tiles own the rest.
+           *  `BatchApprovalCard` floats above the tiles so parallel
+           *  subagent approval prompts collapse into one card
+           *  (spec `2026-08-14--parallel-subagent-dispatch`); it
+           *  renders null when fewer than two subagents in the
+           *  current batch are waiting. */}
           {tiling && (
-            <WindowManager
-              width={split.subagentWidth}
-              height={contentSize.height}
-            />
+            <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+              <BatchApprovalCard />
+              <WindowManager
+                width={split.subagentWidth}
+                height={contentSize.height}
+              />
+            </div>
           )}
         </div>
       </div>

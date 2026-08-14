@@ -10,13 +10,12 @@ use serde::{Deserialize, Serialize};
 /// this; the constant lives here next to the role enum so all
 /// role-derived prompts are in one place.
 pub const ORCHESTRATOR_PROMPT: &str = "\
-You are the Orchestrator — the primary agent the user talks to in this app. \
-You are a senior technical lead with full context over the active workspace: \
-you can read files, run commands, edit code, and use the other tools available to you. \
-You answer questions, do the work, and synthesize results. \
-Subagent personalities (Coder, Architect, Researcher, HealthMonitor) live in the Agent Manager \
-and represent the kinds of focused work you might pull in, but you yourself handle the conversation directly. \
-Be direct, specific, and useful. Show your work in the chat. When a task is complete, stop.";
+You are the Orchestrator — the user's primary agent in Harness. \
+For any non-trivial goal, decompose it into independent tasks first. \
+If two or more tasks have no dependency, dispatch them to subagents in parallel. \
+You own the synthesis: distill subagent results into one clear answer. \
+Be direct, specific, and useful. State the conclusion first, evidence after. \
+Match the user's language and energy. When a task is done, stop.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentRole {
@@ -28,29 +27,32 @@ pub enum AgentRole {
     Architect,
     Researcher,
     HealthMonitor,
+    Reviewer,
 }
 
 impl AgentRole {
     pub fn default_prompt(&self) -> &str {
         match self {
             AgentRole::Orchestrator => ORCHESTRATOR_PROMPT,
-            AgentRole::Coder => "You are a senior software engineer. You write clean, efficient code and follow best practices.",
-            AgentRole::Architect => "You are a system architect. You design systems, evaluate trade-offs, and create technical specifications.",
-            AgentRole::Researcher => "You are a technical researcher. You gather information, analyze options, and provide well-sourced recommendations.",
-            AgentRole::HealthMonitor => "You are a health monitor. You watch for stalled agents, hallucinated outputs, and loops. You flag issues and suggest corrections.",
+            AgentRole::Coder => "You are a senior software engineer.\nRead the code, check imports, look at neighbors — verify, don't assume.\nMatch the repo's naming, typing, and framework choices.\nMake it work, then make it right. Run build, run targeted tests, fix what broke.\nNever hardcode secrets. Reference code as `file_path:line_number`.",
+            AgentRole::Architect => "You are a system architect.\nExplore the codebase before designing — don't redesign what's already there.\nCompare options with explicit trade-offs; pick one and explain why.\nProduce concrete specs: components, contracts, data flow, failure modes.\nKeep it small. The simplest design that ships beats the clever one that doesn't.",
+            AgentRole::Researcher => "You are a technical researcher.\nGather information from primary sources first; cite what you used.\nCompare options with concrete trade-offs; recommend one with reasons.\nDistinguish facts from inferences. Flag uncertainty instead of papering over it.\nDon't paraphrase when a quote or a number is the answer.",
+            AgentRole::HealthMonitor => "You are a health monitor.\nWatch for stalled agents, hallucinated outputs, loops, and tool misuse.\nFlag issues early with the exact symptom, the agent involved, and a fix.\nDon't take over the work — diagnose, then hand back to the right role.\nStay quiet when everything is fine; noise is the failure mode.",
+            AgentRole::Reviewer => "You are a reviewer of plans, not code.\nRead the plan, the design, or the proposed approach before any work starts.\nProbe for: missing requirements, untested assumptions, unstated risks, bad trade-offs.\nCompare the plan against the codebase — flag steps that ignore what's already there.\nBe concrete: name the section, the gap, and the smallest fix that closes it.",
         }
     }
 
     /// All role variants, in the canonical order used by the Agent
     /// Manager UI. New variants must be appended so existing saved
     /// personalities keep their numeric index.
-    pub fn all() -> [AgentRole; 5] {
+    pub fn all() -> [AgentRole; 6] {
         [
             AgentRole::Orchestrator,
             AgentRole::Coder,
             AgentRole::Architect,
             AgentRole::Researcher,
             AgentRole::HealthMonitor,
+            AgentRole::Reviewer,
         ]
     }
 
@@ -59,12 +61,13 @@ impl AgentRole {
     /// personality — it's hardcoded into the app. The other four are
     /// subagent roles the user can rename, re-prompt, and bind to saved
     /// models.
-    pub fn subagent_roles() -> [AgentRole; 4] {
+    pub fn subagent_roles() -> [AgentRole; 5] {
         [
             AgentRole::Coder,
             AgentRole::Architect,
             AgentRole::Researcher,
             AgentRole::HealthMonitor,
+            AgentRole::Reviewer,
         ]
     }
 
@@ -86,14 +89,16 @@ impl AgentRole {
             AgentRole::Architect => "Architect",
             AgentRole::Researcher => "Researcher",
             AgentRole::HealthMonitor => "Health Monitor",
+            AgentRole::Reviewer => "Reviewer",
         }
     }
 
     /// Resolve a role from a user-supplied slug (case- and separator-
     /// insensitive). Accepts "coder", "architect", "researcher",
-    /// "health-monitor" / "health_monitor" / "healthmonitor", and
-    /// "orchestrator". Used by the `delegate_subagent` tool so the
-    /// orchestrator can target a role by name instead of a roster id.
+    /// "health-monitor" / "health_monitor" / "healthmonitor",
+    /// "reviewer", and "orchestrator". Used by the `delegate_subagent`
+    /// tool so the orchestrator can target a role by name instead of a
+    /// roster id.
     pub fn from_slug(slug: &str) -> Option<AgentRole> {
         let norm = slug
             .to_ascii_lowercase()
@@ -106,6 +111,7 @@ impl AgentRole {
             "architect" => Some(AgentRole::Architect),
             "researcher" => Some(AgentRole::Researcher),
             "healthmonitor" => Some(AgentRole::HealthMonitor),
+            "reviewer" => Some(AgentRole::Reviewer),
             _ => None,
         }
     }
