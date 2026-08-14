@@ -78,22 +78,15 @@ function App() {
     return () => observer.disconnect();
   }, []);
 
-  // Chat column width: null until the first subagent spawns (chat
-  // owns the full width, centered). Locks the moment any subagent
-  // goes live, then reflows back to full width the moment every
-  // subagent reaches a terminal state (done / error / cancelled).
-  //
-  // The "any working" predicate (not the raw count) is what makes
-  // the chat float back: a finished subagent record is preserved in
-  // the registry for inspection via `list_subagents`, but the tiling
-  // region collapses once no live work is happening. The chat
-  // already carries the final answer — the `delegate_subagent` tool
-  // folds the subagent's capped final_content into the orchestrator
-  // conversation, so the subagent viewer doesn't need to stay open
-  // for the user to see the result.
-  const hasLiveWork = subagents.some((s) => s.status === "working");
+  // Tiling lifecycle: the right-hand region stays open as long as ANY
+  // subagent is in the registry (working OR finished). The user can
+  // read the final streamed answer after a subagent completes; the
+  // window disappears only when the registry is empty. The registry
+  // itself is cleared when a new orchestrator turn starts (see
+  // subagent-manager.ts), which is the "we're moving on" boundary.
+  const hasSubagents = subagents.length > 0;
   const ratio = chatRatio ?? DEFAULT_CHAT_RATIO;
-  const tiling = hasLiveWork;
+  const tiling = hasSubagents;
   const split = tiling
     ? chatSplit(contentSize.width, ratio, MIN_CHAT_WIDTH)
     : { chatWidth: contentSize.width, subagentWidth: 0 };

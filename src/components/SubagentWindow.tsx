@@ -26,12 +26,20 @@ interface SubagentWindowProps {
 
 /** Read-only viewer for one dispatched subagent turn.
  *
- *  The orchestrator chat is conversational; subagent windows are
- *  NOT. The user cannot type into a subagent. Only the Health Agent
- *  (via the `subagent_message` tool) can push messages to a
- *  subagent's inbox, and the loop drains that inbox at the top of
- *  every round. Inbound Health messages surface as read-only
- *  "Health Monitor" bubbles in this viewer.
+ *  Visual style mirrors the main orchestrator chat: the task the
+ *  orchestrator handed over sits as a right-aligned user bubble, the
+ *  subagent's response streams below as a left-aligned assistant
+ *  message (with the agent name + tool calls inline, just like the
+ *  main `MessageBubble`).
+ *
+ *  The user cannot type into a subagent. Only the Health Agent
+ *  (via the `subagent_message` tool) can push messages into a
+ *  subagent's inbox; those surface as read-only "Health Monitor"
+ *  bubbles in the conversation.
+ *
+ *  No close button — subagent windows live until the next
+ *  orchestrator turn starts (the registry is wiped in unison). A
+ *  Stop button shows only while the subagent is working.
  */
 export function SubagentWindow({ requestId }: SubagentWindowProps) {
   const w = useStore((s) => s.subagentWindows[requestId]);
@@ -44,9 +52,6 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
   }, [w?.content, w?.reasoning, healthMessages.length, w?.toolCalls.length]);
 
   if (!w) {
-    // The window can briefly exist for a request id whose registry
-    // record is gone (e.g. a fast cancel). Render a minimal shell so
-    // the tile still has something to display.
     return (
       <div className="flex flex-col h-full bg-surface-1 rounded border border-border-subtle overflow-hidden">
         <div className="px-3 py-1.5 text-[11px] text-white-30 border-b border-border-subtle bg-surface-2/50">
@@ -58,20 +63,13 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
 
   const status = w.record.status;
   const isWorking = status === "working";
-  const isTerminal =
-    status === "done" || status === "error" || status === "cancelled";
-
-  const handleClose = () => {
-    // Closing a working subagent cancels it; closing a finished one
-    // just removes the window. (Lifecycle: see DESIGN §tiling.)
-    if (isWorking) cancelSubagent(requestId);
-    useStore.getState().removeSubagent(requestId);
-  };
 
   return (
-    <div className="flex flex-col h-full bg-surface-1 rounded border border-border-subtle overflow-hidden">
-      {/* Header: name, role, status, stop, close */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle bg-surface-2/50 shrink-0">
+    <div className="flex flex-col h-full bg-surface-0 overflow-hidden">
+      {/* Header: agent name + role + status. Stop button only while
+       *  the turn is in flight. No close button — windows are
+       *  closed in unison by the next orchestrator turn-start. */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle bg-surface-1 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <StatusDot status={status} />
           <span className="text-[12px] font-medium text-white truncate">
@@ -81,75 +79,101 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
             {w.record.role}
           </span>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          {isWorking && (
-            <button
-              onClick={() => cancelSubagent(requestId)}
-              className="glass-quartz glass-quartz--pill flex items-center justify-center w-6 h-6 text-white-50 hover:text-white"
-              title="Stop subagent"
-              aria-label="Stop subagent"
-            >
-              <Square size={11} fill="currentColor" />
-            </button>
-          )}
+        {isWorking && (
           <button
-            onClick={handleClose}
-            className="glass-quartz glass-quartz--pill flex items-center justify-center w-6 h-6 text-white-50 hover:text-white"
-            title={isWorking ? "Stop and close" : "Close window"}
-            aria-label="Close window"
+            onClick={() => cancelSubagent(requestId)}
+            className="glass-quartz glass-quartz--pill flex items-center justify-center w-6 h-6 text-white-50 hover:text-white shrink-0"
+            title="Stop subagent"
+            aria-label="Stop subagent"
           >
-            <X size={11} />
+            <Square size={11} fill="currentColor" />
           </button>
-        </div>
-      </div>
-
-      {/* Task line: the delegation text the orchestrator handed over. */}
-      <div className="px-3 py-1.5 text-[11px] text-white-30 border-b border-border-subtle bg-surface-1 shrink-0">
-        <span className="text-white-15">Task:</span>{" "}
-        <span className="text-white-50">{w.record.task}</span>
-      </div>
-
-      {/* Read-only viewer body */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0">
-        {w.toolCalls.length > 0 && (
-          <div className="space-y-1">
-            {w.toolCalls.map((call) => (
-              <ToolCallCard key={call.id} call={call} />
-            ))}
-          </div>
         )}
+      </div>
 
-        {/* Health Monitor inbox: read-only bubbles (user can't reply). */}
+      {/* Read-only chat body. Mirrors the main MessageBubble layout:
+       *   - Task: right-aligned user bubble (the delegation text).
+       *   - Tool calls: stacked cards above the assistant text.
+       *   - Health Monitor: right-aligned system-style bubble.
+       *   - Subagent response: left-aligned assistant text with
+       *     agent name above and the streaming "typing…" indicator
+       *     while working. */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
+        {/* Task bubble — the orchestrator's delegation, right-aligned. */}
+        <div className="flex justify-end animate-fade-in">
+          <div className="max-w-[85%]">
+            <div className="text-[10px] font-medium text-white-30 mb-1 text-right">
+              Orchestrator
+            </div>
+            <div className="text-[13px] leading-relaxed bg-surface-3 text-white-50 rounded-2xl rounded-br-sm px-3.5 py-2 whitespace-pre-wrap">
+              {w.record.task}
+            </div>
+          </div>
+        </div>
+
+        {/* Health Monitor bubbles — read-only, right-aligned. */}
         {healthMessages.map((msg, i) => (
-          <HealthBubble key={`hm-${i}-${msg.slice(0, 8)}`} message={msg} />
+          <div key={`hm-${i}-${msg.slice(0, 8)}`} className="flex justify-end animate-fade-in">
+            <div className="max-w-[85%]">
+              <div className="flex items-center justify-end gap-1.5 text-[10px] text-white-30 mb-1 select-none">
+                <span className="font-medium tracking-wide uppercase">Health Monitor</span>
+                <Brain size={10} className="shrink-0" />
+              </div>
+              <div className="text-[13px] leading-relaxed bg-surface-3 text-white-50 rounded-2xl rounded-br-sm px-3.5 py-2 whitespace-pre-wrap">
+                {msg}
+              </div>
+            </div>
+          </div>
         ))}
 
-        {w.content.length > 0 && (
-          <div className="text-[13px] leading-relaxed text-white animate-fade-in">
-            <MessageRenderer
-              content={w.content}
-              reasoning={w.reasoning}
-            />
-            {isWorking && (
-              <span className="inline-flex items-center gap-1.5 mt-1">
-                <Loader2 size={11} className="animate-spin text-white-30" />
-                <span className="text-[10px] text-white-30">working…</span>
-              </span>
-            )}
+        {/* Subagent response — left-aligned assistant bubble. Tool
+         *  calls sit above the text, exactly like the main chat. */}
+        <div className="flex justify-start animate-fade-in">
+          <div className="max-w-[85%]">
+            <div className="text-[11px] font-medium text-white-30 mb-1 flex items-center gap-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-coral" />
+              {w.record.name}
+            </div>
+            <div className="text-[13px] leading-relaxed text-white">
+              {w.toolCalls.length > 0 && (
+                <div className="space-y-1.5 mb-2">
+                  {w.toolCalls.map((call) => (
+                    <ToolCallCard key={call.id} call={call} />
+                  ))}
+                </div>
+              )}
+              {w.content.length > 0 ? (
+                <>
+                  <MessageRenderer
+                    content={w.content}
+                    reasoning={w.reasoning}
+                  />
+                  {isWorking && (
+                    <span className="inline-flex items-center gap-1.5 mt-1">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "160ms" }} />
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "320ms" }} />
+                      <span className="text-[10px] text-white-30">thinking…</span>
+                    </span>
+                  )}
+                </>
+              ) : isWorking ? (
+                <span className="inline-flex items-center gap-1.5 mt-1">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "160ms" }} />
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-white-30 animate-bounce" style={{ animationDelay: "320ms" }} />
+                  <span className="text-[10px] text-white-30">thinking…</span>
+                </span>
+              ) : (
+                <span className="text-white-30 italic text-[12px]">
+                  {status === "done" && "(no output)"}
+                  {status === "cancelled" && "(cancelled)"}
+                  {status === "error" && (w.record.error ?? "(error)")}
+                </span>
+              )}
+            </div>
           </div>
-        )}
-
-        {/* Terminal empty-state: finished without producing any visible
-         *  content. The registry's `finalContent` (if any) is folded
-         *  into the content above, so this only shows when the
-         *  subagent ended with no body text at all. */}
-        {isTerminal && w.content.length === 0 && (
-          <div className="text-[11px] text-white-15 italic">
-            {status === "done" && "(no output)"}
-            {status === "cancelled" && "(cancelled)"}
-            {status === "error" && (w.record.error ?? "(error)")}
-          </div>
-        )}
+        </div>
 
         <div ref={endRef} />
       </div>
@@ -159,7 +183,7 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
        *  channel stays separate from the orchestrator's
        *  `pendingApproval`. */}
       {w.approval && (
-        <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle bg-surface-2 shrink-0 animate-fade-in">
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle bg-surface-1 shrink-0 animate-fade-in">
           <ShieldCheck size={13} className="text-status-warning shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-[11px] text-white font-medium truncate">
@@ -201,9 +225,7 @@ function StatusDot({ status }: { status: SubagentStatus }) {
     );
   }
   if (status === "error") {
-    return (
-      <Circle size={6} className="fill-status-error text-status-error shrink-0" />
-    );
+    return <Circle size={6} className="fill-status-error text-status-error shrink-0" />;
   }
   if (status === "cancelled") {
     return (
@@ -219,57 +241,39 @@ function StatusDot({ status }: { status: SubagentStatus }) {
 function ToolCallCard({ call }: { call: ToolCallRecord }) {
   const running = call.status === "running";
   return (
-    <div className="rounded border border-border-subtle bg-surface-2 px-2 py-1 animate-fade-in">
+    <div className="rounded border border-border-subtle bg-surface-2 px-2.5 py-1.5 animate-fade-in">
       <div className="flex items-center gap-1.5 min-w-0">
         {running ? (
-          <Loader2 size={10} className="shrink-0 animate-spin text-white-50" />
+          <Loader2 size={11} className="shrink-0 animate-spin text-white-50" />
         ) : call.status === "ran" ? (
-          <Check size={10} className="shrink-0 text-status-active" />
+          <Check size={11} className="shrink-0 text-status-active" />
         ) : call.status === "denied" ? (
-          <Ban size={10} className="shrink-0 text-status-warning" />
+          <Ban size={11} className="shrink-0 text-status-warning" />
         ) : (
-          <AlertTriangle size={10} className="shrink-0 text-status-error" />
+          <AlertTriangle size={11} className="shrink-0 text-status-error" />
         )}
-        <Wrench size={10} className="shrink-0 text-white-15" />
-        <span className="text-[11px] font-medium text-white truncate">
+        <Wrench size={11} className="shrink-0 text-white-15" />
+        <span className="text-[12px] font-medium text-white truncate">
           {call.name}
         </span>
         {call.arguments && (
           <span
-            className="text-[10px] text-white-30 font-mono truncate"
+            className="text-[11px] text-white-30 font-mono truncate"
             title={call.arguments}
           >
             {call.arguments}
           </span>
         )}
-        {running && (
-          <span className="text-[9px] text-white-30 shrink-0">running…</span>
-        )}
+        {running && <span className="text-[10px] text-white-30 shrink-0">running…</span>}
       </div>
       {!running && call.summary && (
         <div
-          className="text-[10px] text-white-30 mt-0.5 truncate"
+          className="text-[11px] text-white-30 mt-0.5 truncate"
           title={call.summary}
         >
           {call.summary}
         </div>
       )}
-    </div>
-  );
-}
-
-function HealthBubble({ message }: { message: string }) {
-  return (
-    <div className="rounded border border-border-subtle bg-surface-2 px-2.5 py-1.5 animate-fade-in">
-      <div className="flex items-center gap-1.5 text-[10px] text-white-30 mb-0.5 select-none">
-        <Brain size={10} className="shrink-0" />
-        <span className="font-medium tracking-wide uppercase">
-          Health Monitor
-        </span>
-      </div>
-      <div className="text-[12px] leading-relaxed text-white-50 whitespace-pre-wrap">
-        {message}
-      </div>
     </div>
   );
 }

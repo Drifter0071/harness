@@ -23,21 +23,11 @@ function isSubagentRequestId(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith(SUBAGENT_REQUEST_PREFIX);
 }
 
-/** When a subagent reaches a terminal state, check whether any
- *  other subagent is still working. If not, the tiling region
- *  collapses (App's `hasLiveWork` flips to false) and the chat
- *  reflows back to its original full-width / centered position —
- *  this helper additionally clears the locked `chatRatio` so the
- *  next spawn starts from scratch instead of inheriting a stale
- *  lock. Safe to call on every terminal event: it only acts when
- *  the registry has zero working entries. */
-function reflowChatIfIdle(): void {
-  const st = useStore.getState();
-  const stillWorking = st.subagents.some((s) => s.status === "working");
-  if (!stillWorking) {
-    st.clearChatRatio();
-  }
-}
+/** The chat ratio is no longer auto-cleared on terminal events —
+ *  the right region stays open as long as the subagent registry has
+ *  any entries, and the chat keeps its locked width for the whole
+ *  lifetime of those windows. The orchestrator's next turn-start
+ *  (or a full registry wipe) is what reclaims the full chat width. */
 
 export function useSubagentManager(): void {
   // ── Live event routing (only sub- request ids) ──
@@ -179,9 +169,10 @@ export function useSubagentManager(): void {
                 ? e.reasoning
                 : w?.reasoning ?? "",
           });
-          // If this was the last live turn, reflow the chat back to
-          // its original full-width / centered position.
-          reflowChatIfIdle();
+          // Terminal event: the window stays open so the user can
+          // read the final streamed answer. The chat only reflows
+          // back when a new orchestrator turn starts (see the
+          // `agent-turn-start` listener further down).
         })
       )
     );
@@ -200,10 +191,9 @@ export function useSubagentManager(): void {
             content: w?.content ?? "",
             reasoning: w?.reasoning ?? "",
           });
-          // Same reflow trigger as the done path: a cancelled or
-          // errored subagent is no longer working. If it was the
-          // last live one, the chat reflows.
-          reflowChatIfIdle();
+          // Same as the done path: window stays open, chat ratio
+          // stays locked. Reflow only happens on the next
+          // orchestrator turn-start.
         })
       )
     );
@@ -225,6 +215,45 @@ export function useSubagentManager(): void {
     };
   }, []);
 
+  // ── Orchestrator turn-start → wipe past subagent windows ──
+  // The orchestrator's turn-start event has a non-`sub-` request id,
+  // so it falls through every handler in the block above untouched.
+  // Listen for it here as the "new round" signal: any subagent
+  // windows from the previous turn are stale context, and the new
+  // round gets its own clean right-hand region. The chat ratio is
+  // cleared in the same shot so the chat reflows back to full width
+  // before the first new subagent lands and re-locks it.
+  //
+  // In normal flow the previous orchestrator turn has already
+  // finished (it `await`s every `delegate_subagent` call), so all
+  // subagents are terminal by the time the new turn fires. The
+  // working-subagent branch is defensive: if anything slipped
+  // through, we still cancel it so it doesn't leak into the new
+  // round.
+  useEffect(() => {
+    const reg = (p: Promise<() => void>): Promise<() => void> => {
+      p.catch(() => {});
+      return p;
+    };
+    const unsub = reg(
+      agentEvents.onTurnStart((e) => {
+        if (isSubagentRequestId(e.requestId)) return;
+        const st = useStore.getState();
+        if (st.subagents.length === 0) return;
+        for (const rec of st.subagents) {
+          if (rec.status === "working") {
+            ipc.cancelAgent(rec.requestId).catch(() => {});
+          }
+        }
+        st.clearAllSubagents();
+        st.clearChatRatio();
+      })
+    );
+    return () => {
+      unsub.then((u) => u()).catch(() => {});
+    };
+  }, []);
+
   // ── Registry resync on WebView mount ──
   // After a reload, the live event stream starts blank. Pull the
   // current snapshot from the backend and rebuild the mirror + open
@@ -241,17 +270,13 @@ export function useSubagentManager(): void {
         const list = await ipc.listSubagents();
         if (cancelled) return;
         const st = useStore.getState();
-        // Lock the chat ratio ONLY if a working subagent is still in
-        // the registry. A snapshot of all-terminal records is the
-        // "all subagents terminated" state the user spec calls out:
-        // the chat should reflow back to its original full-width /
-        // centered position immediately on reload, not wait for the
-        // user to close the (now read-only) windows.
-        const hasLive = list.some((r) => r.status === "working");
-        if (hasLive) {
-          if (st.chatRatio === null) st.setChatRatio(DEFAULT_CHAT_RATIO);
-        } else {
-          st.clearChatRatio();
+        // Lock the chat ratio whenever the registry has any entries
+        // (working OR finished — finished windows still occupy the
+        // right region so the user can read their final answer). The
+        // ratio is cleared only by an empty registry or by the next
+        // orchestrator turn-start.
+        if (list.length > 0 && st.chatRatio === null) {
+          st.setChatRatio(DEFAULT_CHAT_RATIO);
         }
         st.setSubagents(list);
         for (const rec of list) {

@@ -238,6 +238,10 @@ interface HarnessState {
   upsertSubagent: (rec: import("./ipc").SubagentRecord) => void;
   removeSubagent: (requestId: string) => void;
   setSubagents: (records: import("./ipc").SubagentRecord[]) => void;
+  /** Wipe the entire subagent registry + every per-window state. Called
+   *  when a new orchestrator turn starts — past subagent viewers close
+   *  in unison so the right region resets for the new round. */
+  clearAllSubagents: () => void;
   /** Per-window stream state. `recordId` keys the entry to the
    *  registry mirror so the renderer can re-key on resync. */
   subagentWindows: Record<
@@ -464,22 +468,22 @@ export const useStore = create<HarnessState>((set) => ({
       const nextSubagents = state.subagents.filter(
         (r) => r.requestId !== requestId,
       );
-      // When the last subagent is removed (either by user close
-      // after a terminal event, or after a cancellation), drop the
-      // chat-ratio lock so the chat reflows back to its original
-      // full-width / centered position. Mirrors the live-event
-      // `reflowChatIfIdle` in `subagent-manager.ts` for the cases
-      // that don't go through the terminal-event path.
-      const nextRatio =
-        nextSubagents.length === 0 ? null : state.chatRatio;
       return {
         subagents: nextSubagents,
         subagentWindows: restWindows,
         healthInbox: restInbox,
-        chatRatio: nextRatio,
       };
     }),
   setSubagents: (records) => set({ subagents: records }),
+  /** Wipe the entire subagent registry + every per-window state. Called
+   *  when a new orchestrator turn starts — past subagent viewers close
+   *  in unison so the right region resets for the new round. */
+  clearAllSubagents: () =>
+    set({
+      subagents: [],
+      subagentWindows: {},
+      healthInbox: {},
+    }),
   subagentWindows: {},
   ensureSubagentWindow: (rec) =>
     set((state) => {
