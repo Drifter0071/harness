@@ -8,8 +8,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { ipc } from "../lib/ipc";
-import type { ModelPrefs, ReasoningEffort, TestResult } from "../lib/ipc";
+import type {
+  CapabilityProbe,
+  ModelPrefs,
+  ReasoningEffort,
+  ReasoningKind,
+  TestResult,
+} from "../lib/ipc";
 import { PROVIDER_PRESETS } from "../lib/models";
+import { capabilitiesFor, inferCapabilities } from "../lib/model-capabilities";
 import { showToast } from "../lib/toast";
 import {
   X,
@@ -25,6 +32,7 @@ import {
   Trash2,
   CircleDot,
   Play,
+  Brain,
 } from "lucide-react";
 import { nanoid } from "nanoid";
 
@@ -46,6 +54,17 @@ interface EditorDraft {
   modelName: string;
   hasKey: boolean;
   keyUnreachable: boolean;
+  /** "" = use the inferred default. Otherwise the user's override
+   *  in tokens. */
+  contextWindow: string;
+  /** "auto" = infer; otherwise the user's chosen capability. */
+  reasoningCapability: "auto" | ReasoningKind;
+  /** "auto" = use canonical; otherwise the user's chosen subset. */
+  reasoningLevels: "auto" | ReasoningEffort[];
+  /** The persisted probe result, used to render the "Last checked"
+   *  line. Kept on the draft so the user can save it as the
+   *  starting point. */
+  capabilityProbe: CapabilityProbe | null;
 }
 
 function draftFromModel(m: {
@@ -57,6 +76,10 @@ function draftFromModel(m: {
   modelName: string;
   hasKey: boolean;
   keyUnreachable: boolean;
+  contextWindow?: number | null;
+  reasoningCapability?: ReasoningKind | null;
+  reasoningLevels?: ReasoningEffort[] | null;
+  capabilityProbe?: CapabilityProbe | null;
 }): EditorDraft {
   return {
     id: m.id,
@@ -68,6 +91,13 @@ function draftFromModel(m: {
     modelName: m.modelName,
     hasKey: m.hasKey,
     keyUnreachable: m.keyUnreachable,
+    contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
+    reasoningCapability: m.reasoningCapability ?? "auto",
+    reasoningLevels:
+      m.reasoningLevels && m.reasoningLevels.length > 0
+        ? (m.reasoningLevels as ReasoningEffort[])
+        : "auto",
+    capabilityProbe: m.capabilityProbe ?? null,
   };
 }
 
@@ -83,6 +113,10 @@ function newDraft(): EditorDraft {
     modelName: preset.models[0] ?? "",
     hasKey: false,
     keyUnreachable: false,
+    contextWindow: "",
+    reasoningCapability: "auto",
+    reasoningLevels: "auto",
+    capabilityProbe: null,
   };
 }
 
@@ -105,6 +139,9 @@ export function Settings() {
   const [prefs, setPrefs] = useState<ModelPrefs>({ thinkingOn: false, reasoningEffort: "medium" });
   const [testState, setTestState] = useState<{ status: "idle" | "testing" | "done"; result?: TestResult }>({ status: "idle" });
   const [saving, setSaving] = useState(false);
+  const [probeState, setProbeState] = useState<
+    { status: "idle" | "probing" | "done"; probe?: CapabilityProbe; error?: string }
+  >({ status: "idle" });
   const keyInputRef = useRef<HTMLInputElement>(null);
 
   // Initial load: models list, then select the focused model (opened
@@ -141,6 +178,7 @@ export function Settings() {
     setKeyEditing(false);
     setShowKeyText(false);
     setTestState({ status: "idle" });
+    setProbeState({ status: "idle" });
     try {
       setPrefs(await ipc.getModelPrefs(d.id));
     } catch {
@@ -203,6 +241,12 @@ export function Settings() {
           format: draft.format,
           baseUrl: draft.baseUrl,
           modelName: draft.modelName,
+          contextWindow: parseContextWindowInput(draft.contextWindow),
+          reasoningCapability:
+            draft.reasoningCapability === "auto" ? null : draft.reasoningCapability,
+          reasoningLevels:
+            draft.reasoningLevels === "auto" ? null : draft.reasoningLevels,
+          capabilityProbe: draft.capabilityProbe,
         },
         apiKeyInput // "" = keep existing; non-empty = overwrite
       );
@@ -267,6 +311,47 @@ export function Settings() {
     }
   };
 
+  /** Run the live capability probe (Anthropic Models API or OpenAI
+   *  smoke test) and apply the result to the draft's override
+   *  fields. The user can then tweak the result before saving. */
+  const handleProbe = async () => {
+    if (!draft) return;
+    if (draft.isNew) {
+      showToast("Save the model first so it has an ID, then probe.");
+      return;
+    }
+    if (dirty && !(await saveDraft())) return;
+    setProbeState({ status: "probing" });
+    try {
+      const probe = await ipc.probeSavedModel(draft.id);
+      setProbeState({ status: "done", probe });
+      // Apply the probe as a starting point — the user can still
+      // adjust before clicking Save. The probe result is also
+      // preserved on the draft for the next save.
+      setDraft((d) =>
+        d
+          ? {
+              ...d,
+              contextWindow:
+                probe.contextWindow != null ? String(probe.contextWindow) : d.contextWindow,
+              reasoningCapability:
+                probe.reasoning ?? d.reasoningCapability,
+              reasoningLevels:
+                probe.reasoningLevels && probe.reasoningLevels.length > 0
+                  ? probe.reasoningLevels
+                  : d.reasoningLevels,
+              capabilityProbe: probe,
+            }
+          : d,
+      );
+      setDirty(true);
+      showToast("Probe complete — review the values and Save.");
+    } catch (err) {
+      setProbeState({ status: "done", error: String(err) });
+      showToast(`Probe failed: ${err}`);
+    }
+  };
+
   const handleResetSecretStore = async () => {
     if (!window.confirm("Reset the secret store? All saved API keys will be removed from the OS keyring. Model entries are kept; you'll need to re-add keys.")) return;
     try {
@@ -304,7 +389,21 @@ export function Settings() {
   const testOk = testState.status === "done" && testState.result?.ok;
   const testErr = testState.status === "done" && !testState.result?.ok ? testState.result! : null;
 
-  return (
+  /** Parse the user-typed context-window string. Empty / invalid
+   *  returns `null` which the backend treats as "no override" and
+   *  the frontend falls back to inference. */
+  function parseContextWindowInput(raw: string): number | null {
+    const cleaned = raw.replace(/[\s,_]/g, "").toLowerCase();
+    if (!cleaned) return null;
+    const m = cleaned.match(/^(\d+(?:\.\d+)?)(k|m)?$/);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const unit = m[2];
+    if (unit === "m") return Math.round(n * 1_000_000);
+    if (unit === "k") return Math.round(n * 1_000);
+    return Math.round(n);
+  }  return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" onClick={close} />
 
@@ -464,6 +563,128 @@ export function Settings() {
                       </div>
                     </div>
                   </Field>
+
+                  {/* Capabilities — context window + reasoning support.
+                      Lets the user correct what the catalog and the
+                      provider probe returned. The Probe button runs the
+                      live probe and seeds the form with the result. */}
+                  <div className="pt-2 border-t border-border-subtle space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-[12px] uppercase tracking-wide text-white-30 font-medium flex items-center gap-1.5">
+                          <Brain size={12} /> Capabilities
+                        </h3>
+                        <p className="text-[11px] text-white-30 mt-0.5">
+                          What this model can do. Override anything that's wrong.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleProbe}
+                        disabled={probeState.status === "probing" || draft.isNew}
+                        className="flex items-center gap-1.5 text-[12px] text-white-50 hover:text-white transition-colors disabled:opacity-50"
+                        title="Ask the provider for this model's context window and reasoning support"
+                      >
+                        <RefreshCw size={12} className={probeState.status === "probing" ? "animate-spin" : ""} />
+                        {probeState.status === "probing" ? "Probing..." : "Probe"}
+                      </button>
+                    </div>
+
+                    <Field label="Context window">
+                      <input
+                        className={inputCls}
+                        value={draft.contextWindow}
+                        onChange={(e) => update({ contextWindow: e.target.value })}
+                        placeholder={String(inferCapabilities(draft.modelName, draft.format).contextWindow)}
+                      />
+                      <p className="text-[11px] text-white-30 mt-1">
+                        Empty = use the inferred default ({inferCapabilities(draft.modelName, draft.format).contextWindow.toLocaleString()}). Accepts "1m" / "200k" / "128000".
+                      </p>
+                    </Field>
+
+                    <Field label="Reasoning">
+                      <div className="relative">
+                        <select
+                          className={`${inputCls} appearance-none cursor-pointer pr-8`}
+                          value={draft.reasoningCapability}
+                          onChange={(e) =>
+                            update({
+                              reasoningCapability: e.target.value as EditorDraft["reasoningCapability"],
+                            })
+                          }
+                        >
+                          <option value="auto" className="bg-surface-2 text-white">
+                            Auto ({inferCapabilities(draft.modelName, draft.format).reasoning})
+                          </option>
+                          <option value="none" className="bg-surface-2 text-white">None (no reasoning control)</option>
+                          <option value="thinking" className="bg-surface-2 text-white">Thinking toggle (Anthropic-style)</option>
+                          <option value="effort" className="bg-surface-2 text-white">Reasoning effort (low/medium/high)</option>
+                        </select>
+                        <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-white-30" />
+                      </div>
+                      {draft.reasoningCapability === "effort" && (
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className="text-[11px] text-white-30">Levels:</span>
+                          {(["low", "medium", "high"] as const).map((lvl) => {
+                            const enabled =
+                              draft.reasoningLevels === "auto"
+                                ? true
+                                : draft.reasoningLevels.includes(lvl);
+                            return (
+                              <button
+                                key={lvl}
+                                type="button"
+                                onClick={() => {
+                                  const current =
+                                    draft.reasoningLevels === "auto"
+                                      ? (["low", "medium", "high"] as ReasoningEffort[])
+                                      : draft.reasoningLevels;
+                                  const next = enabled
+                                    ? current.filter((l) => l !== lvl)
+                                    : [...current, lvl];
+                                  update({
+                                    reasoningLevels:
+                                      next.length === 0
+                                        ? "auto"
+                                        : (next.sort((a, b) =>
+                                            a === b ? 0 : a === "low" ? -1 : b === "low" ? 1 : a === "medium" ? -1 : 1,
+                                          ) as ReasoningEffort[]),
+                                  });
+                                }}
+                                className={`px-2 py-0.5 text-[11px] rounded transition-colors ${
+                                  enabled
+                                    ? "bg-status-active text-black"
+                                    : "bg-surface-2 text-white-30 hover:text-white"
+                                }`}
+                                title={enabled ? "Click to hide this level" : "Click to enable this level"}
+                              >
+                                {lvl}
+                              </button>
+                            );
+                          })}
+                          {draft.reasoningLevels !== "auto" && (
+                            <button
+                              type="button"
+                              onClick={() => update({ reasoningLevels: "auto" })}
+                              className="text-[11px] text-white-30 hover:text-white ml-1 underline"
+                            >
+                              reset
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </Field>
+
+                    {draft.capabilityProbe && (
+                      <p className="text-[11px] text-white-30">
+                        Last probed: {new Date(draft.capabilityProbe.probedAt).toLocaleString()} via {draft.capabilityProbe.source}
+                        {draft.capabilityProbe.note ? ` — ${draft.capabilityProbe.note}` : ""}
+                      </p>
+                    )}
+                    {probeState.error && (
+                      <p className="text-[11px] text-status-error">Probe failed: {probeState.error}</p>
+                    )}
+                  </div>
 
                   {/* API key — masked, never round-trips */}
                   <Field label="API Key">

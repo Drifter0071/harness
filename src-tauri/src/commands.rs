@@ -2,18 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentMessage, AgentRole, AgentStatus};
 use crate::llm_client;
 use crate::models as models_mod;
+use crate::personalities::{AgentPersonality, PersonalityRoster};
 use crate::secrets::SecretStore;
+use crate::tools::BipState;
 
 // ============================= App State =============================
 
+#[derive(Clone)]
 pub struct AppState {
-    pub agents: Mutex<HashMap<String, Agent>>,
+    pub agents: Arc<Mutex<HashMap<String, Agent>>>,
     /// OS keyring-backed secret store. `Arc` so the LLM client can
     /// hold a reference after the IPC closure returns.
     pub secrets: Arc<dyn SecretStore>,
@@ -28,16 +31,27 @@ pub struct AppState {
     /// running turn — tools execute sequentially). `respond_approval` resolves
     /// them.
     pub pending_approvals: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Active session file watcher. None until the frontend calls
+    /// `watch_session` after opening a project.
+    pub session_watcher: Arc<Mutex<Option<crate::session_watcher::SessionWatcher>>>,
+    /// Current Bip (mascot) state. The Health Agent drives this via the
+    /// `bip` tool; the frontend subscribes to the `bip-state` Tauri event
+    /// and may also call `get_bip_state` on first mount to seed itself
+    /// before the next event fires. See
+    /// `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
+    pub bip_state: Arc<RwLock<BipState>>,
 }
 
 impl AppState {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
         Self {
-            agents: Mutex::new(HashMap::new()),
+            agents: Arc::new(Mutex::new(HashMap::new())),
             secrets,
             in_flight: Arc::new(dashmap::DashMap::new()),
             agent_in_flight: Arc::new(dashmap::DashMap::new()),
             pending_approvals: Arc::new(dashmap::DashMap::new()),
+            session_watcher: Arc::new(Mutex::new(None)),
+            bip_state: Arc::new(RwLock::new(BipState::default())),
         }
     }
 }
@@ -382,23 +396,15 @@ pub async fn set_active_session(project_path: String, session_id: String) -> Res
     crate::session::set_active_session(&project_path, &session_id).await
 }
 
-#[tauri::command]
-pub async fn load_agent_roster(project_path: String) -> Result<crate::agents::AgentRoster, String> {
-    crate::agents::load_agent_roster(&project_path).await
-}
-
-#[tauri::command]
-pub async fn save_agent_roster(
-    project_path: String,
-    roster: crate::agents::AgentRoster,
-) -> Result<crate::agents::AgentRoster, String> {
-    crate::agents::save_agent_roster(&project_path, &roster).await
-}
-
 // ============================= Agent turn loop =============================
 
 /// Kick off one agent turn for a session. Returns immediately; progress
 /// streams back through `agent-*` app events routed by `requestId`.
+///
+/// `reasoning_effort` is an optional hint carried over from the user's
+/// model prefs. It is forwarded to OpenAI-compat gateways as
+/// `reasoning_effort` so reasoning-capable models return
+/// `delta.reasoning_content` for the chain-of-thought display.
 #[tauri::command]
 pub async fn run_agent_turn(
     app: tauri::AppHandle,
@@ -410,6 +416,7 @@ pub async fn run_agent_turn(
     action_mode: crate::session::ActionMode,
     goal_mode: bool,
     workspace: String,
+    reasoning_effort: Option<crate::models::ReasoningEffort>,
 ) -> Result<(), String> {
     let session = crate::session::load_session(&workspace, &session_id)
         .await?
@@ -417,6 +424,11 @@ pub async fn run_agent_turn(
 
     let sink: Arc<dyn crate::agent_loop::AgentEventSink> =
         Arc::new(crate::agent_loop::AppEventSink::new(app));
+    // Wrap the sink so `bip-state` emissions also persist to AppState.
+    // This keeps a single source of truth (the lock) so a freshly
+    // connected WebView can seed itself via `get_bip_state`.
+    let sink: Arc<dyn crate::agent_loop::AgentEventSink> =
+        Arc::new(BipPersistingSink::new(sink, state.bip_state.clone()));
     let completer: Arc<dyn crate::agent_loop::TurnCompleter> = Arc::new(
         crate::agent_loop::LlmClientTurner::new(state.secrets.clone()),
     );
@@ -433,6 +445,7 @@ pub async fn run_agent_turn(
         state.pending_approvals.clone(),
         state.agent_in_flight.clone(),
         completer,
+        reasoning_effort,
     );
     Ok(())
 }
@@ -459,6 +472,94 @@ pub async fn cancel_agent(request_id: String, state: State<'_, AppState>) -> Res
         let _ = tx.send(true);
     }
     Ok(())
+}
+
+// ============================= Bip mascot state =============================
+//
+// The `bip` tool is the only way to mutate this state. It's gated on
+// `AgentRole::HealthMonitor` in `tools::tool_bip`. The frontend subscribes
+// to the `bip-state` Tauri event and may also call `get_bip_state` on first
+// mount to seed itself with the current value (avoids a flash of "idle"
+// before the first event of a session).
+
+/// Snapshot the current Bip state. The WebView calls this once on mount.
+#[tauri::command]
+pub async fn get_bip_state(state: State<'_, AppState>) -> Result<BipState, String> {
+    Ok(state.bip_state.read().await.clone())
+}
+
+// ============================= Agent personalities =============================
+//
+// Global, app-wide. The frontend's Agent Manager is the only writer.
+//
+// After the v3 chat-agent-as-orchestrator refactor, the chat agent
+// itself isn't a personality — every session runs the hardcoded
+// Orchestrator. The roster is the home for the four subagent
+// personalities (Coder, Architect, Researcher, HealthMonitor) the
+// orchestrator may dispatch to in a future subagent loop.
+// `resolve_active_model_for_personality` is the helper the dispatcher
+// will use to pick a saved model for a subagent at dispatch time. See
+// `docs/superpowers/specs/2026-08-13--global-personalities.md`.
+
+/// Load the global personality roster. On first contact, seeds four
+/// builtin rows (one per subagent `AgentRole`) and persists the file.
+#[tauri::command]
+pub async fn load_personalities() -> Result<PersonalityRoster, String> {
+    crate::personalities::load_personalities().await
+}
+
+/// Persist the global personality roster atomically. Enforces builtin
+/// invariants and returns the normalized roster.
+#[tauri::command]
+pub async fn save_personalities(
+    roster: PersonalityRoster,
+) -> Result<PersonalityRoster, String> {
+    crate::personalities::save_personalities(&roster).await
+}
+
+/// Look up one personality by id. Returns the default personality if
+/// the id is unknown (so a session always has something to run with).
+#[tauri::command]
+pub async fn get_personality(id: String) -> Result<AgentPersonality, String> {
+    match crate::personalities::get_personality(&id).await? {
+        Some(p) => Ok(p),
+        None => {
+            let roster = crate::personalities::load_personalities().await?;
+            Ok(roster
+                .personalities
+                .into_iter()
+                .find(|p| p.id == roster.default_personality_id)
+                .expect("default personality must exist after enforce_invariants"))
+        }
+    }
+}
+
+/// Resolve which saved-model id a personality should use. If the
+/// personality has a `modelId`, look it up in the saved-models store
+/// and confirm it still exists. Otherwise return `None` so the caller
+/// can fall back to the active chat model.
+///
+/// Reserved for the future subagent-dispatch loop: the chat agent
+/// itself is the hardcoded Orchestrator and doesn't use per-personality
+/// model overrides. Kept here so the subagent dispatcher can pick the
+/// right saved model when the orchestrator decides to delegate.
+#[allow(dead_code)]
+pub async fn resolve_active_model_for_personality(
+    personality: &AgentPersonality,
+) -> Result<Option<String>, String> {
+    let Some(model_id) = personality.model_id.as_ref() else {
+        return Ok(None);
+    };
+    // Read the saved-models file directly (no keyring) so the lookup
+    // works in tests and doesn't depend on the secret store.
+    let file = models_mod::read_models_file().await?;
+    if file.models.iter().any(|m| m.id == *model_id) {
+        Ok(Some(model_id.clone()))
+    } else {
+        // Stale reference — the user removed the model after picking
+        // it. Treat as "no override" and let the chat model take over.
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -512,6 +613,35 @@ pub async fn save_saved_model(
     state: State<'_, AppState>,
 ) -> Result<models_mod::SavedModel, String> {
     models_mod::save_saved_model(&*state.secrets, model, api_key.as_deref()).await
+}
+
+/// Probe a saved model's capabilities (context window + reasoning
+/// support) by talking to the provider. Used by the "Probe" button
+/// in Settings. The result is NOT auto-saved; the frontend applies
+/// it to the editor draft and the user explicitly saves.
+#[tauri::command]
+pub async fn probe_saved_model(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<models_mod::CapabilityProbe, String> {
+    // Pull the persisted record to get base_url/format/model_name.
+    let list = models_mod::list_saved_models(&*state.secrets).await?;
+    let saved = list
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("model {id} not found"))?;
+    let api_key = state
+        .secrets
+        .get(&id)
+        .map_err(|e| format!("keyring error: {e}"))?
+        .unwrap_or_default();
+    crate::capabilities::probe_capabilities(
+        &saved.format,
+        &saved.base_url,
+        &saved.model_name,
+        &api_key,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -581,10 +711,70 @@ pub async fn chat_complete(
     Ok(())
 }
 
+/// Start (or replace) the session file watcher for `workspace_path`.
+/// Called by the frontend right after loading a project. Emits
+/// `session-file-changed` whenever a session JSON file under
+/// `<workspace>/.harness/sessions/` is written.
+#[tauri::command]
+pub async fn watch_session(
+    workspace_path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use std::path::PathBuf;
+    let mut guard = state.session_watcher.lock().await;
+    // Drop the old watcher (releasing the OS handle) before starting
+    // a new one — only one watch per process.
+    *guard = None;
+    let path = PathBuf::from(&workspace_path);
+    let watcher = crate::session_watcher::SessionWatcher::start(app, path)
+        .map_err(|e| format!("watcher: {e}"))?;
+    *guard = Some(watcher);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn cancel_chat(request_id: String, state: State<'_, AppState>) -> Result<(), String> {
     if let Some((_, tx)) = state.in_flight.remove(&request_id) {
         let _ = tx.send(());
     }
     Ok(())
+}
+
+// ============================= Bip sink wrapper =============================
+//
+// `BipPersistingSink` is an `AgentEventSink` that delegates to a wrapped
+// sink (the production `AppEventSink` in `run_agent_turn`) and, on every
+// `bip-state` event, also writes the new state into `AppState.bip_state`.
+// This keeps a single source of truth (the in-memory lock) so the frontend
+// can `get_bip_state` on first mount instead of guessing the current
+// value from a possibly-stale event stream.
+
+pub struct BipPersistingSink {
+    inner: Arc<dyn crate::agent_loop::AgentEventSink>,
+    bip_state: Arc<RwLock<BipState>>,
+}
+
+impl BipPersistingSink {
+    pub fn new(
+        inner: Arc<dyn crate::agent_loop::AgentEventSink>,
+        bip_state: Arc<RwLock<BipState>>,
+    ) -> Self {
+        Self { inner, bip_state }
+    }
+}
+
+impl crate::agent_loop::AgentEventSink for BipPersistingSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        if event == "bip-state" {
+            if let Ok(state) = serde_json::from_value::<BipState>(payload.clone()) {
+                // Best-effort persist: if the lock is held by a slow reader
+                // we still bubble the event out (the next one will catch up).
+                if let Ok(mut guard) = self.bip_state.try_write() {
+                    *guard = state;
+                }
+            }
+        }
+        self.inner.emit(event, payload);
+    }
 }

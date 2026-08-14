@@ -1,19 +1,44 @@
 import { useEffect } from "react";
 import { ActiveJobBar } from "./components/ActiveJobBar";
+import { TitleBar } from "./components/TitleBar";
+import { ChatHeader } from "./components/ChatHeader";
 import { DynamicCanvas } from "./components/DynamicCanvas";
 import { Sidebar } from "./components/Sidebar";
 import { Settings } from "./components/Settings";
 import { Chat } from "./components/Chat";
 import { AgentManager } from "./components/AgentManager";
 import { useStore } from "./lib/store";
+import { ipc } from "./lib/ipc";
 import { useProjectLifecycle, flushPendingSave } from "./lib/session-manager";
 import { useModelBootstrap } from "./lib/model-bootstrap";
 import { ToastHost } from "./lib/toast";
+
+function usePersonalitiesBootstrap() {
+  const setPersonalities = useStore((s) => s.setPersonalities);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const roster = await ipc.loadPersonalities();
+        if (!cancelled) setPersonalities(roster);
+      } catch (err) {
+        // Best-effort: Agent Manager will show a one-time error on open.
+        // The agent loop's `resolve_personality` falls back to the
+        // default if the roster is missing, so sessions keep working.
+        console.error("Failed to load personalities:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [setPersonalities]);
+}
 
 function App() {
   const { settingsOpen, canvasPanels, agentManagerOpen } = useStore();
   useProjectLifecycle();
   useModelBootstrap();
+  usePersonalitiesBootstrap();
 
   useEffect(() => {
     const handler = () => {
@@ -28,7 +53,15 @@ function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-0 overflow-hidden relative">
-      <ActiveJobBar />
+      <TitleBar />
+      {/* Top zone: pill row (row 1) + stats row (row 2) share the same
+          3-column tracks (1fr / auto / 1fr). The center column auto-sizes
+          to fit Bip and the stats row, so the stats line is visually
+          anchored directly under Bip and never drifts to one side. */}
+      <div className="px-3 grid grid-cols-[1fr_auto_1fr] gap-2 items-start">
+        <ActiveJobBar />
+        <ChatHeader />
+      </div>
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <div className="flex-1 flex flex-col overflow-hidden">

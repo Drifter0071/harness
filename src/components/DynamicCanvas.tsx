@@ -4,7 +4,7 @@ import { ipc } from "../lib/ipc";
 import { MessageRenderer } from "./MessageRenderer";
 import type { CanvasPanel, SessionMessage } from "../lib/store";
 import { nanoid } from "nanoid";
-import { X, Circle } from "lucide-react";
+import { Send, X, Circle } from "lucide-react";
 
 const nowIso = () => new Date().toISOString();
 
@@ -54,41 +54,63 @@ function SubCanvas({ panel, onClose }: { panel: CanvasPanel; onClose: () => void
   return (
     <div className="flex flex-col bg-surface-1 rounded border border-border-subtle overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle bg-surface-2/50">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <Circle size={6} className={
-            panel.status === "working" ? "fill-status-active text-status-active" :
+            panel.status === "working" ? "fill-status-active text-status-active animate-pulse" :
             panel.status === "error" ? "fill-status-error text-status-error" : "fill-white-15 text-white-15"
           } />
           <span className="text-[12px] font-medium text-white truncate">{panel.agentName}</span>
-          <span className="text-[11px] text-white-15">{panel.role}</span>
+          <span className="text-[11px] text-white-15 truncate">{panel.role}</span>
         </div>
-        <button onClick={onClose} className="text-white-15 hover:text-white-50 transition-colors p-0.5">
-          <X size={12} />
+        <button
+          onClick={onClose}
+          className="glass-quartz glass-quartz--pill flex items-center justify-center w-7 h-7 text-white-50 hover:text-white shrink-0"
+          title={`Close ${panel.agentName}`}
+          aria-label={`Close ${panel.agentName}`}
+        >
+          <X size={13} />
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-        {messages.map((msg) => (
-          <div key={msg.id} className="text-[13px]">
-            {msg.role === "user" ? (
-              <div className="text-white-50">{msg.content}</div>
-            ) : (
-              <div className="text-white-30"><MessageRenderer content={msg.content} /></div>
-            )}
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
+      {messages.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center px-3">
+          <span className="text-[12px] text-white-15 select-none">
+            Message {panel.agentName} to start a thread
+          </span>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
+          {messages.map((msg) => (
+            <div key={msg.id} className="text-[13px]">
+              {msg.role === "user" ? (
+                <div className="text-white-50">{msg.content}</div>
+              ) : (
+                <div className="text-white"><MessageRenderer content={msg.content} reasoning={msg.reasoning} /></div>
+              )}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+      )}
 
       <div className="border-t border-border-subtle p-2">
-        <div className="flex items-center bg-surface-2 rounded border border-border-subtle">
+        <div className="flex items-center gap-1.5 bg-surface-2 rounded border border-border-subtle focus-within:border-border-strong transition-colors">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSend()}
             placeholder={`Message ${panel.agentName}...`}
-            className="flex-1 bg-transparent text-[12px] text-white px-3 py-2 outline-none placeholder:text-white-15"
+            className="flex-1 bg-transparent text-[12px] text-white px-3 py-2 outline-none placeholder:text-white-30"
           />
+          <button
+            onClick={handleSend}
+            disabled={!input.trim()}
+            className="glass-quartz glass-quartz--pill shrink-0 w-7 h-7 mr-1 flex items-center justify-center text-white"
+            title="Send"
+            aria-label="Send"
+          >
+            <Send size={13} />
+          </button>
         </div>
       </div>
     </div>

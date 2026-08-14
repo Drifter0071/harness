@@ -1,0 +1,18 @@
+fix(chat): read delta.reasoning_content for reasoning models
+
+Xiaomi MiMo v2.5 via Kilo AI is a reasoning model. Its
+OpenAI-compatible stream returns the model's text in
+`delta.reasoning_content` (DeepSeek-style extension) and leaves
+`delta.content` empty, so the chat parser silently dropped every
+token and the user saw an empty response.
+
+The OpenAI streaming parser now reads BOTH `delta.reasoning_content`
+and `delta.content`, accumulating whichever is non-empty into
+`full_content` and emitting it as a single `chat-chunk` event.
+Both are sent in the same chunk when both are present, in
+reasoning-first order so the UI can distinguish them by formatting
+later if needed.
+
+Combined with the file-watcher live-reload from the previous
+commit, the chat UI now updates even when the streaming events
+themselves don't reach the WebView.

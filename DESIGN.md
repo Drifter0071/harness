@@ -6,8 +6,11 @@
 > This spec is generated from the code, not the other way around. When the
 > code and this doc disagree, **the code wins** — fix this doc.
 >
-> Last reconciled: against `src/index.css`, `tailwind.config.js`, and the
-> component tree under `src/components/`.
+> Last reconciled: 2026-08-13 against `src/index.css`, `tailwind.config.js`,
+> and the component tree under `src/components/` — chat message hierarchy
+> (assistant = brightest), topbar show-sidebar button, Agent Manager slider,
+> canvas send/focus/empty states, session header buttons, file-type icons,
+> ChatHeader telemetry.
 
 ## Philosophy
 
@@ -32,7 +35,7 @@ isn't enough (pseudo-elements, the `glass-quartz` material).
 |---|---|---|
 | `surface-0` | `#000000` | App canvas — the void. Body, between-pane gutters. |
 | `surface-1` | `#0a0a0a` | Sidebar background, modal panels, canvas sub-tiles. |
-| `surface-2` | `#111111` | Cards, inputs, active surfaces, chat-user bubbles, "compact" surfaces. |
+| `surface-2` | `#111111` | Cards, inputs, active surfaces, "compact" surfaces. |
 | `surface-3` | `#1a1a1a` | Hover state, **user message bubble background**, "elevated" cards. |
 | `surface-4` | `#222222` | Active inputs, focused elements. Reserved; rarely used in the current tree. |
 
@@ -229,19 +232,49 @@ still applies. Practical notes from the code:
 - `py-1.5` (6px) — list-row vertical padding (default)
 - `py-3` (12px) — section break inside a sidebar pane
 
-The ActiveJobBar sits at `top-3` with `left-1/2 -translate-x-1/2` and a
-34×34 hit target for each button. That's the load-bearing floating position
-in the app.
+The ActiveJobBar sits at `top-[52px]` (36px custom title bar + 16px gap)
+with `left-1/2 -translate-x-1/2` and a 34×34 hit target for each button.
+That's the load-bearing floating position in the app. The offset is paired
+with `TITLEBAR_HEIGHT` in `TitleBar.tsx` — if the title bar height changes,
+update this to match.
 
 ## Component patterns
 
 ### Chat message (`Chat.tsx`)
 
 - **User:** right-aligned, `bg-surface-3`, `rounded-2xl rounded-br-sm`,
-  `px-4 py-2.5`. Body is `text-white`.
-- **Assistant:** left-aligned, no bubble. Body is `text-white-50`. Above
-  the body, a label row with a `bg-status-active` 1.5×1.5 dot, the agent
-  name in `text-white-30` at `text-[11px] font-medium`, and a 1.5px gap.
+  `px-4 py-2.5`. Body is `text-white-50` — the prompt is the input, not
+  the substance.
+- **Assistant:** left-aligned, no bubble. Body is `text-white` — the
+  output is the substance and reads brightest, matching the canvas
+  sub-tile hierarchy. Above the body, a label row with a
+  `bg-status-active` 1.5×1.5 dot, the agent name in `text-white-30` at
+  `text-[11px] font-medium`, and a 1.5px gap.
+- **Reply prose** (`MessageBody` → `.prose-harness`, typography in
+  `src/index.css`): markdown renders with real hierarchy inside the
+  black/white world. Body inherits the bubble's color and size (14px
+  chat / 13px canvas threads), line-height 1.7, `overflow-wrap: break-word`.
+  Headings are 600-weight steps (1.15 / 1.07 / 1em) with more air above
+  than below. Lists restore disc/decimal markers (Preflight strips
+  them), marker color `white-50`. Inline code is a `white-08` chip with
+  a hairline border; fenced code blocks are `surface-2` panels at
+  `0.875em` mono, `pre-wrap` (no horizontal scroll), with a hover-revealed
+  toolbar (`CodeBlockDecorator` in `markdown.tsx`) showing the language
+  label (`white-30`, 10px, uppercase, tracked) and a 24×24 `surface-3`
+  copy button (`Copy`/`Check` Lucide, clipboard + textarea fallback);
+  always visible on touch devices (`@media (hover: none)`). Fenced code
+  gets real syntax highlighting via `highlight.js` (curated language set
+  in `highlight.ts`) — code tokens are the one sanctioned use of hue: a
+  muted, desaturated editor palette (soft blue keywords, green strings,
+  orange numbers, cyan types, red built-ins on gray comments) so code
+  reads like a real editor while UI chrome stays monochrome. Links
+  underline in `white-30` and brighten to white on hover — no blue, the
+  world is monochrome (code tokens excepted). Blockquotes get a 2px
+  `border-strong` left rule
+  and `white-50` body; tables get hairline rows, a `border-strong`
+  header rule, and 0.93em type; `hr` is `border-default`. Images round
+  to 8px, take a hairline, and open in the lightbox via the existing
+  `button.lightbox-trigger` wrapper.
 - **System:** centered pill, `bg-surface-2`, `text-white-30` at `text-[12px]`,
   `px-3 py-1`, `rounded-full`, `border-border-subtle`.
 - **Animation:** every message is `animate-fade-in` (150ms `ease-out`).
@@ -250,22 +283,52 @@ in the app.
 
 A single fixed pill at top-center, `glass-mist glass-mist--pill`, holding:
 
-1. **Open folder** — 34×34 `glass-quartz glass-quartz--pill` button (`FolderPlus`).
-2. A 1px vertical divider (`w-px h-4 bg-border-subtle`).
-3. **Status indicator** — when idle: a `Circle` (6px) at `fill-white-15` plus
+1. **Show sidebar** — rendered only while `!sidebarOpen`. 34×34
+   `glass-quartz glass-quartz--pill` button (`PanelLeftOpen`), sitting
+   flush with no divider to its right — it groups with Open folder as a
+   pair of actions, so dividers only separate action groups.
+2. **Open folder** — 34×34 `glass-quartz glass-quartz--pill` button (`FolderPlus`).
+3. A 1px vertical divider (`w-px h-4 bg-border-subtle`).
+4. **Status indicator** — when idle: a `Circle` (6px) at `fill-white-15` plus
    "Idle" in `text-[11px] text-white-15`. When active: a tinted pill at
    `bg-accent-green/10 border border-accent-green/20` with a `Circle` (6px)
    at `fill-accent-green` and `animate-pulse`, plus the first activity label
    truncated to 160px.
-4. A 1px vertical divider.
-5. **Settings** — 34×34 `glass-quartz glass-quartz--pill` button (`Settings`).
+5. A 1px vertical divider.
+6. **Settings** — 34×34 `glass-quartz glass-quartz--pill` button (`Settings`).
 
 Hovering the status pill reveals a `glass-mist` popover (`min-w-[280px]`,
 `p-3`, `animate-fade-in`) with the full activity list and active agents.
 The popover uses `top-full left-1/2 -translate-x-1/2 mt-2`.
 
-The SidebarToggleFloating is a 34×34 `glass-quartz glass-quartz--pill` button
-at `left-3 top-[18px]`, only visible when the sidebar is closed.
+The sidebar's open affordance lives in the ActiveJobBar (Show sidebar
+button); there is no floating toggle anymore.
+
+### Title bar (`TitleBar.tsx`)
+
+The window is undecorated (`decorations: false` in `tauri.conf.json`,
+plus `shadow: false` so Windows 11 doesn't force a 1px white border or
+rounded corners onto the black canvas). `TitleBar.tsx` replaces the
+native chrome with a pure-black 36px strip:
+
+- **Layout:** `bg-surface-0`, 36px tall, hairline `border-border-subtle`
+  bottom edge, `select-none`. Sits above every overlay (`z-[60]`, above
+  the Settings / Agent Manager `z-50`) so the window can always be
+  dragged, minimized, maximized or closed — like native chrome.
+- **Wordmark:** left side, "HARNESS" with the panel-label recipe
+  (`text-[9px] uppercase tracking-[0.14em] font-medium text-white-15`).
+- **Window controls:** right side, three full-height buttons with 46px
+  hit targets (the Windows convention): Minimize (`Minus`), Maximize /
+  Restore (`Square` / `Copy`, swapped via the resize listener), Close
+  (`X`). At rest `text-white-50`; hover lifts to white on `white-08`;
+  Close hovers to `status-error`. Buttons `stopPropagation` the mousedown
+  so they stay out of the drag region.
+- **Dragging:** the strip and its wordmark carry `data-tauri-drag-region`
+  — drag moves the window, double-click maximizes (native HTCAPTION),
+  and edge resizing still works (tao's borderless resize handles).
+- **Maximized state:** tracked via `isMaximized()` + `onResized` from
+  `@tauri-apps/api/window`. In plain-browser dev the controls render
+  but no-op.
 
 ### Agent controls (`Chat.tsx`, `AgentManager.tsx`)
 
@@ -278,7 +341,9 @@ block, stacked above the input:
   `Ask all`; `bg-surface-2` shell, active segment `bg-surface-4 text-white`,
   inactive `text-white-30 hover:text-white`, `text-[11px]`) plus a right-side
   **Goal** toggle — the same `w-7 h-4` switch recipe as the Thinking toggle,
-  with a `Target` icon (12px) that turns `text-status-active` when on.
+  with a `Target` icon (12px) that turns `text-status-active` when on. Both
+  switches share the focus ring recipe —
+  `focus-visible:outline-2 outline-white/60 outline-offset-2`.
 - **Pending approval card** — transient, shown above the input while the
   Rust loop waits on a tool call: `bg-surface-2 border-border-subtle rounded`,
   `ShieldCheck` (15px, `text-status-warning`), tool name in
@@ -286,16 +351,46 @@ block, stacked above the input:
   (`text-[11px] text-white-30 truncate`), and Allow / Deny buttons
   (Allow: `bg-status-active text-black`; Deny: `bg-surface-4`, hover
   `text-status-error`). Card clears itself on either response.
-- **Live activity strip** — while a turn runs, the last 4 persisted
-  `activities` render as compact rows (`text-[10px] text-white-30`):
-  `Wrench` icon (10px, `text-white-15`), tool name tinted by status
-  (`ran` → `text-status-active`, `denied` → `text-status-warning`,
-  `error` → `text-status-error`), summary truncated to 220px.
+- **Tool-call cards in the message stream** — every tool call the LLM makes
+  renders as a compact card on its assistant message (keyed by the
+  `agent-<requestId>` placeholder), so the chat timeline shows what the agent
+  did — live and after reload. Card: `bg-surface-2 border-border-subtle
+  rounded px-2.5 py-1.5`; a status icon (running → `Loader2` 11px spinning
+  `text-white-50`; `ran` → `Check` `text-status-active`; `denied` → `Ban`
+  `text-status-warning`; `error` → `AlertTriangle` `text-status-error`),
+  `Wrench` (11px, `text-white-15`), tool name (`text-[12px] font-medium
+  text-white`), args in mono (`text-[11px] text-white-30 font-mono truncate`),
+  and the result summary below once finished (`text-[11px] text-white-30
+  truncate`). Live entries come from `agent-tool-start` / `agent-tool-result`;
+  persisted `activities` (now carrying `requestId` + `arguments`) rebuild the
+  cards on session load. This replaces the old transient composer strip.
 - **Agent Manager** (`AgentManager.tsx`) — modal opened from the Sessions
-  panel's Bot button: `max-agents-per-session` number input, per-agent
-  cards (name, role select, system-prompt textarea), Add agent, Save →
-  `saveAgentRoster` (backend normalizes; the builtin `harness` agent is
-  editable but not deletable).
+  panel's Bot button. Max-agents-per-session is a **custom `slider-quartz`
+  range** (1–12): a 4px two-tone track filled by an inline `--slider-fill`
+  percentage, a 16px white disc thumb, a mono value readout, and a focus
+  ring mirroring `button.glass-quartz:focus-visible` (Firefox parity via
+  `::-moz-*`, reduced-motion respected). Save is a
+  `glass-quartz glass-quartz--pill px-4 py-1.5 text-[12px] text-white`
+  button → `saveAgentRoster` (backend normalizes; the builtin `harness`
+  agent is editable but not deletable).
+
+### Chat header telemetry (`ChatHeader.tsx`)
+
+A quiet readout strip above the message list; it also anchors the sidebar
+column via the live-measured `chatHeaderHeight` (`useLayoutEffect` +
+`ResizeObserver`). Each row is a `text-[12px]` label/value pair — labels
+`text-white-30`, values `text-white-50`, `justify-between`:
+
+- **Model** — the active model's label, static text (`truncate`); model
+  switching lives in the composer's `ModelSelect`.
+- **Last response** — `N in · M out` tokens for the most recent turn.
+- **Context used** — `used / window` plus a 1px context bar (`h-px
+  bg-white-15` track) filled by fraction: `bg-status-active` below 60%,
+  `bg-status-warning` ≤ 85%, `bg-status-error` above.
+- **This session** — cumulative peak-in / total-out across the session
+  (shown only when the backend reports totals).
+- **Session window** — `N% used · resets in …` (hidden unless the
+  provider sent rate-limit headers).
 
 ### Sidebar — two-panel floating column (`Sidebar.tsx`)
 
@@ -372,8 +467,11 @@ column.
   - Active: `text-white bg-white/[0.05] border-l border-accent-green/60`,
     1.5×1.5 `bg-accent-green` dot with `shadow-[0_0_8px_rgba(34,197,94,0.7)]`
     on the left.
-  - `..` row uses `FileText` icon (not `ChevronRight` rotated) — small
-    affordance simplification.
+  - **File-type icons:** every file row renders `FileTypeIcon`
+    (`react-file-icon`, size 14 — same as the @-mention popover) with a
+    `ml-1.5` gutter; folder icons are 12px. `FileText` is retained only
+    for the `..` parent row (a small affordance simplification, not a
+    rotated `ChevronRight`).
 - Rows enter with `animate-list-item` and the standard 25ms stagger
   capped at 8 items.
 - Body cap: `maxHeight: CONTENT_BODY_MAX` (240px). A tall project tree
@@ -381,7 +479,9 @@ column.
 
 **Sessions panel** (bottom, `grow` — fills the remaining column space):
 - Header: `History` icon (10px, `text-white-30`) + `SESSIONS` label +
-  count badge on the right.
+  count badge and two 34×34 `glass-quartz glass-quartz--pill` buttons on
+  the right: **New session** (`Plus`, only when a workspace is open) and
+  **Agent Manager** (`Bot`). The pair mirrors the topbar's pill buttons.
 - Body uses `flex-1 overflow-y-auto min-h-0` so it fills whatever
   vertical space remains after Content and the close button row.
 - Empty state: "No sessions yet. Start a conversation." in
@@ -421,18 +521,19 @@ column.
   and stream `agent-*` events routed by `requestId`.
 
 **Open / close flow:**
-- When `sidebarOpen` is `false`: a single `SidebarToggleFloating` button
-  at `left: 12px / top: 18px` (`left-3 top-[18px]`), 34×34
-  `glass-quartz glass-quartz--pill`, `PanelLeftOpen` icon at 16px.
-  Clicking it opens the column.
-- When `sidebarOpen` is `true`: the floating open toggle disappears,
-  the column slides in, and a **close button** appears at the top of
-  the Content panel header (right side), 34×34, same material, with
-  `PanelLeftClose` at 16px. Clicking it closes the column.
-- The two buttons are at different positions on purpose: the open
-  toggle is a fixed global anchor (always at the same place), while
-  the close is contextual (next to the content it dismisses). They
-  are the same size and material so they read as a pair.
+- When `sidebarOpen` is `false`: the **Show sidebar** button inside the
+  ActiveJobBar pill (leftmost position, 34×34 `glass-quartz
+  glass-quartz--pill`, `PanelLeftOpen` at 16px) opens the column. It is
+  only rendered while the sidebar is closed, so the pill never carries a
+  dead button.
+- When `sidebarOpen` is `true`: the Show sidebar button disappears from
+  the pill, the column slides in, and a **close button** appears at the
+  top of the Content panel header (right side), 34×34, same material,
+  with `PanelLeftClose` at 16px. Clicking it closes the column.
+- The two buttons are at different positions on purpose: the open sits
+  in the global top pill (a fixed anchor), while the close is contextual
+  (next to the content it dismisses). They are the same size and material
+  so they read as a pair.
 
 **Time formatting** (`formatRelativeTime` helper in `Sidebar.tsx`):
 - `< 1m` → `now`
@@ -453,14 +554,22 @@ column.
 - A grid of 1 / 2 / 3 columns depending on panel count: `count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3`.
 - Each sub-tile is `bg-surface-1 border border-border-subtle` (no glass), with:
   - **Header** at `bg-surface-2/50`, `border-b border-border-subtle`,
-    `px-3 py-1.5`. Contains a 6px `Circle` indicator (green/working, red/error,
-    white-15/idle), the agent name in `text-[12px] font-medium text-white`,
-    the role in `text-[11px] text-white-15`, and an X close button.
+    `px-3 py-1.5`. Contains a 6px `Circle` indicator (green + `animate-pulse`
+    while working, red/error, white-15/idle), the agent name in
+    `text-[12px] font-medium text-white`, the role in `text-[11px]
+    text-white-15`, and a 28×28 (`w-7 h-7`) `glass-quartz glass-quartz--pill`
+    close button with an `aria-label`.
+  - **Empty state** (no messages): centered hint in `text-[12px]
+    text-white-15` — "Message {agentName} to start a thread".
   - **Body** `flex-1 overflow-y-auto p-3 space-y-2.5`. User messages in
-    `text-white-50`, assistant in `text-white-30`, both at `text-[13px]`.
+    `text-white-50`, assistant in `text-white` (via `MessageRenderer`),
+    both at `text-[13px]`.
   - **Footer** `border-t border-border-subtle p-2`, with a `bg-surface-2
-    border border-border-subtle rounded` input, `bg-transparent text-[12px]
-    text-white px-3 py-2`.
+    border border-border-subtle rounded focus-within:border-border-strong`
+    container holding the input (`bg-transparent text-[12px] text-white
+    px-3 py-2`, `placeholder:text-white-30`) and a Send button
+    (`glass-quartz glass-quartz--pill w-7 h-7`, disabled while the input
+    is empty).
 
 ### Settings modal (`Settings.tsx`)
 
@@ -565,9 +674,17 @@ Lucide only. Sized in `9 / 10 / 12 / 14 / 16 / 18` pixels. Stroke width
 defaults. Color follows the text role (`text-white-15` for inactive,
 `text-white-50` for hover, `text-white` for active).
 
-In use: `ChevronRight`, `Folder`, `FileText`, `X`, `FolderOpen`,
-`PanelLeftClose`, `PanelLeftOpen`, `Send`, `Loader2`, `Settings`, `Circle`,
-`FolderPlus`, `Eye`, `EyeOff`, `RefreshCw`, `XCircle`, `ChevronDown`.
+In use: `Settings`, `Circle`, `FolderPlus`, `PanelLeftOpen`,
+`PanelLeftClose`, `Folder`, `FileText`, `History`, `Bot`, `Plus`, `X`,
+`Send`, `Loader2`, `Square`, `RefreshCw`, `ShieldCheck`, `Target`,
+`Check`, `Wrench`, `Trash2`, `Brain`, `Lock`, `AlertTriangle`,
+`ChevronDown`, `ChevronRight`, `Eye`, `EyeOff`, `XCircle`,
+`CheckCircle2`, `CircleDot`, `Play`.
+
+File-type glyphs are **not** Lucide: the content tree and @-mention
+popover render `FileTypeIcon` from `react-file-icon` (see
+`src/lib/file-icons.tsx` for the curated `DEV_STYLES` palette and
+`THEME_OVERRIDES`).
 
 ## Open questions
 
@@ -579,13 +696,15 @@ next pass doesn't punt on them.
    Pick one and migrate. (My recommendation: keep `status.*` for Tailwind,
    `--accent-*` for the CSS-side material/shadow values, and document
    that they're aliases.)
-2. **Reduced-motion coverage.** `animate-pulse` and `animate-spin` are
-   not yet disabled when `prefers-reduced-motion: reduce` is on. Add it
-   on next pass.
+2. **Reduced-motion coverage.** The `slider-quartz` thumb transition is
+   disabled, but `animate-pulse` and `animate-spin` still are not when
+   `prefers-reduced-motion: reduce` is on. Add it on next pass.
 3. **Focus styles.** `:focus-visible` exists on `button.glass-quartz`
-   (2px white outline at 60%, 2px offset) and on `glass-mist`
-   (border becomes `border-strong`). Inputs rely on `focus:border-border-strong`.
-   There's no shared focus ring utility yet.
+   (2px white outline at 60%, 2px offset), the Thinking/Goal switches and
+   the `slider-quartz` thumb reuse the same ring via utilities, and
+   `glass-mist` (border becomes `border-strong`). Inputs rely on
+   `focus:border-border-strong`. There's no shared focus-ring utility yet —
+   the ring recipe is now repeated in three places.
 4. **Modal vs. side panel for Settings.** Settings is a centered modal
    with a backdrop. As the form grows (model picker, defaults, advanced),
    a side panel may serve better. Not urgent.

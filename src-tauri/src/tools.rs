@@ -5,15 +5,23 @@
 //! targets are forced inside the session workspace via `resolve_within`,
 //! commands run with a hard timeout, and output is capped so the model
 //! context never explodes.
+//!
+//! `bip` is the one meta-tool that doesn't manipulate the workspace — it
+//! sets the on-screen agent mascot's mood and inner monologue. It is the
+//! only tool whose access is gated by `caller_role`: only the Health Agent
+//! (`AgentRole::HealthMonitor`) may call it. See `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::agent::AgentRole;
+use crate::agent_loop::AgentEventSink;
 use crate::llm_client::ToolSpec;
 
 /// Output cap for tool `content` (model context budget).
@@ -31,6 +39,119 @@ pub struct ToolResult {
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+}
+
+// -- Bip meta-tool types ---------------------------------------------------
+//
+// `bip` is the only tool that does not touch the workspace. It is the on-
+// screen agent mascot's "expression": the Health Agent calls it to set Bip's
+// mood (drives the animation state) and an optional one-sentence thought that
+// appears in Bip's popover. Rust is the source of truth; the UI subscribes
+// to the `bip-state` Tauri event. See `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
+
+/// Bip's current mood / animation state. Matches the four `MascotMood`
+/// values used by the frontend's `AgentMascot` component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BipMood {
+    Idle,
+    Working,
+    Success,
+    Error,
+}
+
+/// Who set the current `BipState`. Today only the health agent drives it,
+/// but the enum leaves room for a future `System` / `User` source without
+/// breaking the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BipSource {
+    Health,
+}
+
+/// The full Bip state broadcast to the WebView on every change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BipState {
+    pub mood: BipMood,
+    /// Short sentence shown in Bip's popover. Empty string means "use the
+    /// frontend's per-mood default".
+    #[serde(default)]
+    pub thought: String,
+    /// ISO-8601 UTC timestamp the state was set.
+    pub at: String,
+    pub source: BipSource,
+}
+
+impl Default for BipState {
+    fn default() -> Self {
+        Self {
+            mood: BipMood::Idle,
+            thought: String::new(),
+            at: now_iso8601(),
+            source: BipSource::Health,
+        }
+    }
+}
+
+/// Minimal ISO-8601 UTC timestamp ("YYYY-MM-DDTHH:MM:SSZ"). We avoid pulling
+/// in `chrono` / `time` for a single field.
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Civil-from-days adapted from Howard Hinnant's date.h (public domain).
+    let z = (secs / 86400) as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let secs_of_day = (secs % 86400) as u32;
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
+}
+
+/// Inputs the agent loop passes to every tool call. Centralising these here
+/// means the `bip` role-gate, the `run_command` policy gate, and the event
+/// emission can all hang off the same place.
+pub struct ToolContext {
+    /// Absolute path to the active session's workspace root.
+    pub workspace: String,
+    /// Policy/approval verdict from the loop. `run_command` is the only
+    /// tool that reads this; everything else ignores it.
+    pub auto_allowed: bool,
+    /// The role of the agent that initiated the call. `bip` rejects any
+    /// caller that isn't `HealthMonitor`.
+    pub caller_role: AgentRole,
+    /// Where tool-emitted events (e.g. `bip-state`) are broadcast.
+    pub sink: Arc<dyn AgentEventSink>,
+}
+
+impl ToolContext {
+    /// Build a context for an arbitrary agent. `auto_allowed` defaults to
+    /// `true` (the loop has already cleared the call by routing it here);
+    /// tests that need a different value set it explicitly.
+    pub fn for_agent(
+        workspace: &str,
+        caller_role: AgentRole,
+        sink: Arc<dyn AgentEventSink>,
+    ) -> Self {
+        Self {
+            workspace: workspace.to_string(),
+            auto_allowed: true,
+            caller_role,
+            sink,
+        }
+    }
 }
 
 impl ToolSpec {
@@ -120,20 +241,43 @@ impl ToolSpec {
                     "required": ["query"]
                 }),
             },
+            ToolSpec {
+                name: "bip".into(),
+                description: "Set the on-screen agent mascot (Bip)'s mood and inner monologue. \
+                              Only callable by the Health Agent. The UI listens for the \
+                              `bip-state` event and updates Bip's animation + thoughts popover."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "mood": {
+                            "type": "string",
+                            "enum": ["idle", "working", "success", "error"],
+                            "description": "Bip's mood — drives the animation state."
+                        },
+                        "thought": {
+                            "type": "string",
+                            "description": "Short sentence shown in Bip's popover. \
+                                            Omit to fall back to the per-mood default thought."
+                        }
+                    },
+                    "required": ["mood"]
+                }),
+            },
         ]
     }
 }
 
-/// Execute one tool call. `auto_allowed` is the policy/approval verdict the
-/// loop already made: `run_command` is defense-in-depth gated on it (the
-/// loop passes `true` after policy clearance or user approval), every other
-/// tool executes and reports.
+/// Execute one tool call. The `ctx` carries everything a tool might need:
+/// the workspace root, the policy/approval verdict (`auto_allowed`), the
+/// caller's role (so role-gated tools like `bip` can refuse), and an event
+/// sink for state broadcasts (`bip-state`).
 pub async fn execute_tool(
-    workspace: &str,
+    ctx: &ToolContext,
     name: &str,
     args: &Value,
-    auto_allowed: bool,
 ) -> Result<ToolResult, String> {
+    let workspace = ctx.workspace.as_str();
     match name {
         "read_file" => tool_read_file(workspace, args).await,
         "list_dir" => tool_list_dir(workspace, args).await,
@@ -141,12 +285,13 @@ pub async fn execute_tool(
         "write_file" => tool_write_file(workspace, args).await,
         "edit_file" => tool_edit_file(workspace, args).await,
         "run_command" => {
-            if !auto_allowed {
+            if !ctx.auto_allowed {
                 return Err("run_command requires approval".into());
             }
             tool_run_command(workspace, args, COMMAND_TIMEOUT).await
         }
         "web_search" => tool_web_search(args).await,
+        "bip" => tool_bip(ctx, args).await,
         other => Err(format!("Unknown tool: {}", other)),
     }
 }
@@ -386,6 +531,101 @@ async fn tool_web_search(args: &Value) -> Result<ToolResult, String> {
     })
 }
 
+/// `bip` — set the on-screen mascot's mood and (optionally) inner monologue.
+///
+/// Hard-gated: only the Health Agent (`AgentRole::HealthMonitor`) may call
+/// this. Any other role gets a refused `ToolResult` with a clear message
+/// (we don't error out the whole turn — the model can recover and keep
+/// using the rest of its toolset).
+async fn tool_bip(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    if ctx.caller_role != AgentRole::HealthMonitor {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "bip is restricted to the Health Agent; {:?} is not allowed",
+                ctx.caller_role
+            ),
+            content: None,
+        });
+    }
+
+    // Parse + validate the mood. We do this by hand (rather than
+    // `serde_json::from_value::<BipMood>`) so the error message names the
+    // rejected value — the agent's debug logs get the exact string back.
+    let mood_str = match args.get("mood").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "bip: `mood` is required and must be a string".into(),
+                content: None,
+            });
+        }
+    };
+    let mood = match mood_str {
+        "idle" => BipMood::Idle,
+        "working" => BipMood::Working,
+        "success" => BipMood::Success,
+        "error" => BipMood::Error,
+        other => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: format!(
+                    "bip: unknown mood {:?} (expected one of: idle, working, success, error)",
+                    other
+                ),
+                content: None,
+            });
+        }
+    };
+
+    // `thought` is optional. If the agent passes a non-string we reject it
+    // (rather than silently ignoring) so the model gets clear feedback.
+    let thought = match args.get("thought") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "bip: `thought` must be a string when provided".into(),
+                content: None,
+            });
+        }
+    };
+
+    // Cap the thought length defensively — the popover is small.
+    let thought = if thought.len() > 200 {
+        truncate(&thought, 200)
+    } else {
+        thought
+    };
+
+    let state = BipState {
+        mood,
+        thought: thought.clone(),
+        at: now_iso8601(),
+        source: BipSource::Health,
+    };
+
+    // Persist + broadcast. The persist path lives in `commands::AppState`;
+    // here we only emit the event so listeners (UI + future log shippers)
+    // see the change immediately. The `init_bip_state` command lets a
+    // freshly-connected WebView fetch the current value.
+    if let Ok(payload) = serde_json::to_value(&state) {
+        ctx.sink.emit("bip-state", payload);
+    }
+
+    Ok(ToolResult {
+        ok: true,
+        summary: format!(
+            "bip: {} ({} chars of thought)",
+            mood_str,
+            thought.chars().count()
+        ),
+        content: None,
+    })
+}
+
 // -- Workspace guard --
 
 /// Resolve `target` (absolute or workspace-relative) to a path that is
@@ -558,10 +798,40 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentRole;
+    use crate::agent_loop::AgentEventSink;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
     fn ws(dir: &TempDir) -> String {
         dir.path().to_string_lossy().to_string()
+    }
+
+    /// Test sink that records every emitted (event, payload) pair.
+    #[derive(Default)]
+    struct TestSink {
+        events: Mutex<Vec<(String, Value)>>,
+    }
+    impl AgentEventSink for TestSink {
+        fn emit(&self, event: &str, payload: Value) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event.to_string(), payload));
+        }
+    }
+
+    /// Build a fresh `ToolContext` for a test. Defaults to `Coder` + a fresh
+    /// `TestSink`; tests for `bip` override the role and inspect the sink.
+    fn ctx_for(workspace: &str, caller_role: AgentRole) -> (ToolContext, std::sync::Arc<TestSink>) {
+        let sink = std::sync::Arc::new(TestSink::default());
+        let ctx = ToolContext {
+            workspace: workspace.to_string(),
+            auto_allowed: true,
+            caller_role,
+            sink: sink.clone() as std::sync::Arc<dyn AgentEventSink>,
+        };
+        (ctx, sink)
     }
 
     // -- Workspace guard matrix --
@@ -636,10 +906,9 @@ mod tests {
         let w = ws(&dir);
 
         let res = execute_tool(
-            &w,
+            &ctx_for(&w, AgentRole::Coder).0,
             "edit_file",
             &json!({"path": "src/app.rs", "old": "TODO: fix", "new": "fixed"}),
-            true,
         )
         .await
         .unwrap();
@@ -656,11 +925,11 @@ mod tests {
         let root = dir.path();
         std::fs::write(root.join("a.txt"), "no match here").unwrap();
         let w = ws(&dir);
+        let (ctx, _) = ctx_for(&w, AgentRole::Coder);
         let res = execute_tool(
-            &w,
+            &ctx,
             "edit_file",
             &json!({"path": "a.txt", "old": "missing", "new": "x"}),
-            true,
         )
         .await;
         assert!(res.is_err());
@@ -668,10 +937,9 @@ mod tests {
 
         std::fs::write(root.join("b.txt"), "dup dup").unwrap();
         let res = execute_tool(
-            &w,
+            &ctx,
             "edit_file",
             &json!({"path": "b.txt", "old": "dup", "new": "x"}),
-            true,
         )
         .await;
         assert!(res.is_err());
@@ -685,10 +953,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let w = ws(&dir);
         let res = execute_tool(
-            &w,
+            &ctx_for(&w, AgentRole::Coder).0,
             "write_file",
             &json!({"path": "deep/nested/file.txt", "content": "hello"}),
-            true,
         )
         .await
         .unwrap();
@@ -710,23 +977,23 @@ mod tests {
         std::fs::write(root.join("README.md"), "docs").unwrap();
         let w = ws(&dir);
 
-        let read = execute_tool(&w, "read_file", &json!({"path": "src/main.rs"}), true)
+        let (ctx, _) = ctx_for(&w, AgentRole::Coder);
+        let read = execute_tool(&ctx, "read_file", &json!({"path": "src/main.rs"}))
             .await
             .unwrap();
         assert!(read.ok);
         assert_eq!(read.content.as_deref(), Some("fn main(){}"));
 
-        let list = execute_tool(&w, "list_dir", &json!({"path": "."}), true)
+        let list = execute_tool(&ctx, "list_dir", &json!({"path": "."}))
             .await
             .unwrap();
         assert!(list.ok);
         assert!(list.content.unwrap().contains("README.md"));
 
         let search = execute_tool(
-            &w,
+            &ctx,
             "search_files",
             &json!({"root": ".", "pattern": "main"}),
-            true,
         )
         .await
         .unwrap();
@@ -740,11 +1007,12 @@ mod tests {
     async fn run_command_requires_approval_flag() {
         let dir = TempDir::new().unwrap();
         let w = ws(&dir);
+        let (mut ctx, _) = ctx_for(&w, AgentRole::Coder);
+        ctx.auto_allowed = false;
         let res = execute_tool(
-            &w,
+            &ctx,
             "run_command",
             &json!({"command": "echo", "args": ["hi"]}),
-            false,
         )
         .await;
         assert!(res.is_err());
@@ -757,13 +1025,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let w = ws(&dir);
         let res = execute_tool(
-            &w,
+            &ctx_for(&w, AgentRole::Coder).0,
             "run_command",
             &json!({
                 "command": "powershell",
                 "args": ["-NoProfile", "-Command", "Write-Output ('x' * 50000)"]
             }),
-            true,
         )
         .await
         .unwrap();
@@ -780,10 +1047,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let w = ws(&dir);
         let res = execute_tool(
-            &w,
+            &ctx_for(&w, AgentRole::Coder).0,
             "run_command",
             &json!({"command": "sh", "args": ["-c", "yes x | head -c 100000"]}),
-            true,
         )
         .await
         .unwrap();
@@ -815,11 +1081,12 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_validates_query_arg() {
-        let res = execute_tool("", "web_search", &json!({}), true).await;
+        let (ctx, _) = ctx_for("", AgentRole::Coder);
+        let res = execute_tool(&ctx, "web_search", &json!({})).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("query"));
 
-        let res = execute_tool("", "web_search", &json!({"query": 42}), true).await;
+        let res = execute_tool(&ctx, "web_search", &json!({"query": 42})).await;
         assert!(res.is_err());
     }
 
@@ -829,8 +1096,125 @@ mod tests {
     async fn unknown_tool_is_rejected() {
         let dir = TempDir::new().unwrap();
         let w = ws(&dir);
-        let res = execute_tool(&w, "nope", &json!({}), true).await;
+        let res = execute_tool(&ctx_for(&w, AgentRole::Coder).0, "nope", &json!({})).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Unknown tool"));
+    }
+
+    // -- bip meta-tool --
+
+    #[tokio::test]
+    async fn bip_refuses_non_health_caller() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::Coder);
+        let res = execute_tool(&ctx, "bip", &json!({"mood": "working"}))
+            .await
+            .unwrap();
+        assert!(
+            !res.ok,
+            "bip must refuse non-Health callers; got: {:?}",
+            res
+        );
+        assert!(res.summary.contains("Health Agent"));
+        // No event was emitted — the refusal happens before we touch the sink.
+        assert!(sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bip_emits_event_for_health_caller() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let res = execute_tool(
+            &ctx,
+            "bip",
+            &json!({"mood": "success", "thought": "All quiet on the disk."}),
+        )
+        .await
+        .unwrap();
+        assert!(res.ok, "summary: {}", res.summary);
+        assert!(res.summary.contains("success"));
+
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "exactly one event");
+        assert_eq!(events[0].0, "bip-state");
+        let payload = &events[0].1;
+        assert_eq!(payload["mood"], "success");
+        assert_eq!(payload["thought"], "All quiet on the disk.");
+        assert_eq!(payload["source"], "health");
+        assert!(payload["at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn bip_omitted_thought_falls_back_to_empty() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let res = execute_tool(&ctx, "bip", &json!({"mood": "idle"}))
+            .await
+            .unwrap();
+        assert!(res.ok);
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(events[0].1["thought"], "");
+        assert_eq!(events[0].1["mood"], "idle");
+    }
+
+    #[tokio::test]
+    async fn bip_rejects_unknown_mood() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let res = execute_tool(&ctx, "bip", &json!({"mood": "vibing"}))
+            .await
+            .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("unknown mood"));
+        assert!(sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bip_rejects_missing_mood() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let res = execute_tool(&ctx, "bip", &json!({})).await.unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("`mood` is required"));
+        assert!(sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bip_rejects_non_string_thought() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let res = execute_tool(&ctx, "bip", &json!({"mood": "working", "thought": 42}))
+            .await
+            .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("`thought` must be a string"));
+        assert!(sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bip_truncates_overlong_thought() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, sink) = ctx_for(&w, AgentRole::HealthMonitor);
+        let huge = "x".repeat(5000);
+        let res = execute_tool(&ctx, "bip", &json!({"mood": "working", "thought": huge}))
+            .await
+            .unwrap();
+        assert!(res.ok);
+        let events = sink.events.lock().unwrap().clone();
+        let payload_thought = events[0].1["thought"].as_str().unwrap();
+        // The cap is 200 chars (the popover is small). Allow a tiny byte
+        // overage from the ASCII suffix in `truncate`.
+        assert!(
+            payload_thought.chars().count() <= 200,
+            "thought should be truncated, got {} chars",
+            payload_thought.chars().count()
+        );
     }
 }

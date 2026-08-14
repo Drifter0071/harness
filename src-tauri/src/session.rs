@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
@@ -36,6 +37,11 @@ pub struct Message {
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Chain-of-thought captured for thinking-capable models.
+    /// `None` (or absent) on plain chat turns. The frontend renders
+    /// this in a collapsible "Thinking" block above the message body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Per-session token telemetry (spec §4.5). `null` until the first
@@ -84,18 +90,80 @@ pub struct ToolActivity {
     pub status: ToolActivityStatus,
     /// ISO 8601 UTC string.
     pub timestamp: String,
+    /// `requestId` of the agent turn that ran this tool. Lets the
+    /// frontend attach tool calls to the right assistant message
+    /// (`agent-<requestId>`) so they render inline in the chat and
+    /// survive a reload. `None` for non-tool records (e.g. turn errors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Raw JSON arguments of the call, for display in the chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
 }
 
-/// Snapshot of the agent personality that drives a session. Persisted so
-/// reopening a session restores the exact agent even if the roster later
-/// changes; the orchestrator dispatch reuses this field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Marker struct on a `Session`. After the v3 chat-agent-as-orchestrator
+/// refactor, every session runs the Orchestrator (the chat agent); the
+/// subagent personalities (Coder, Architect, Researcher, HealthMonitor)
+/// live in the global roster and are read live for future subagent
+/// dispatch. The session file carries a near-empty marker so the
+/// payload shape stays stable; legacy v1 / v2 session files that
+/// embedded a full personality snapshot still load — the fields are
+/// parsed but no longer used by the agent loop.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshot {
-    pub id: String,
-    pub name: String,
-    pub role: AgentRole,
-    pub system_prompt: String,
+    /// Legacy v1 fields. Accepted on input so old session files keep
+    /// loading, but never serialized. The current model doesn't carry
+    /// a per-session agent identity; the chat is always the
+    /// Orchestrator.
+    #[serde(default, skip_serializing)]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub role: Option<AgentRole>,
+    #[serde(default, skip_serializing)]
+    pub system_prompt: Option<String>,
+}
+
+impl AgentSnapshot {
+    /// Stable id for the snapshot, used in the session summary's
+    /// `agent_id` slot. Every session's agent is the Orchestrator
+    /// (the chat agent); this returns the constant orchestrator id
+    /// used elsewhere in the app.
+    pub fn agent_id(&self) -> String {
+        ORCHESTRATOR_AGENT_ID.to_string()
+    }
+
+    /// Human display name for the snapshot. Every session is the
+    /// Orchestrator.
+    pub fn agent_name(&self) -> String {
+        "Orchestrator".to_string()
+    }
+}
+
+/// Stable id used in the session summary's `agent_id` slot and the
+/// chat header's "Agent" label. The chat agent is always the
+/// Orchestrator; this id is the canonical reference.
+pub const ORCHESTRATOR_AGENT_ID: &str = "orchestrator";
+
+/// In-band "this turn finished" marker written by the agent loop on the
+/// final persist, right before the terminal event. The frontend uses it as
+/// a disk-based completion signal when streaming events don't reach the
+/// WebView, so responses still appear without a manual refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTurn {
+    pub request_id: String,
+    /// `"done"` or `"error"`.
+    pub status: String,
+    pub at: String,
+    /// Final reasoning captured for the turn, if any. Mirrored on the
+    /// session file so the file-watcher fallback (the one that fixes
+    /// "responses only show after refresh") can apply it when the
+    /// streaming events never reach the WebView.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Session wire format v2 — one self-contained file per session under
@@ -125,6 +193,9 @@ pub struct Session {
     pub activities: Vec<ToolActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_stats: Option<TokenStats>,
+    /// Completed-turn marker from the agent loop (see [`LastTurn`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn: Option<LastTurn>,
 }
 
 fn default_version() -> u32 {
@@ -132,12 +203,14 @@ fn default_version() -> u32 {
 }
 
 pub fn default_agent_snapshot() -> AgentSnapshot {
-    AgentSnapshot {
-        id: "harness".into(),
-        name: "harness".into(),
-        role: AgentRole::Orchestrator,
-        system_prompt: AgentRole::Orchestrator.default_prompt().to_string(),
-    }
+    AgentSnapshot::default()
+}
+
+/// Load the live subagent personalities roster (read-only) so the
+/// agent loop can include subagent context in the orchestrator's
+/// system prompt. Future work: dispatch subagents by id from here.
+pub async fn load_subagent_roster() -> Result<crate::personalities::PersonalityRoster, String> {
+    crate::personalities::load_personalities().await
 }
 
 /// Lightweight per-session metadata for the Sessions panel. The full
@@ -306,8 +379,8 @@ fn summarize(s: &Session, project_path: &str) -> SessionSummary {
         updated_at: s.updated_at.clone(),
         message_count: s.messages.len(),
         title: s.title.clone(),
-        agent_id: Some(s.agent.id.clone()),
-        agent_name: Some(s.agent.name.clone()),
+        agent_id: Some(s.agent.agent_id()),
+        agent_name: Some(s.agent.agent_name()),
     }
 }
 
@@ -361,6 +434,14 @@ pub async fn create_session(
     let dir = ensure_sessions_dir(project_path).await?;
     let now = now_iso();
     let id = Uuid::new_v4().to_string();
+    // After the v3 chat-agent-as-orchestrator refactor, every session
+    // runs the Orchestrator. The `agent` arg is accepted for legacy
+    // IPC compatibility (frontend callers used to pass a
+    // `personalityId`) but it's discarded — the field is preserved in
+    // the legacy deserialized fields if the caller sent any, and
+    // dropped on the next save.
+    let agent = agent.unwrap_or_default();
+    };
     let session = Session {
         version: 2,
         id: id.clone(),
@@ -368,12 +449,13 @@ pub async fn create_session(
         project_path: project_path.to_string(),
         created_at: now.clone(),
         updated_at: now,
-        agent: agent.unwrap_or_else(default_agent_snapshot),
+        agent,
         goal_mode: false,
         action_mode: ActionMode::AskRisky,
         messages: Vec::new(),
         activities: Vec::new(),
         token_stats: None,
+        last_turn: None,
     };
     write_session_atomic(&dir, &session).await?;
     set_active_session(project_path, &id).await?;
@@ -586,6 +668,7 @@ pub async fn migrate_v1_if_needed(project_path: &str) -> Result<Option<String>, 
         messages: v1.messages,
         activities: Vec::new(),
         token_stats: v1.token_stats,
+        last_turn: None,
     };
     derive_title(&mut session);
     let dir = ensure_sessions_dir(project_path).await?;
@@ -788,6 +871,7 @@ mod tests {
                 mentions: vec![],
                 agent_id: None,
                 agent_name: None,
+                reasoning: None,
             }],
             activities: vec![ToolActivity {
                 id: "act1".into(),
@@ -795,6 +879,8 @@ mod tests {
                 summary: "read src/main.rs".into(),
                 status: ToolActivityStatus::Ran,
                 timestamp: iso_now(),
+                request_id: Some("req-1".into()),
+                arguments: Some(serde_json::json!({ "path": "src/main.rs" })),
             }],
             token_stats: Some(TokenStats {
                 last_in: 10,
@@ -804,6 +890,7 @@ mod tests {
                 session_window_used: Some(0.23),
                 session_window_resets_at: Some("2026-08-12T00:00:00Z".into()),
             }),
+            last_turn: None,
         }
     }
 
@@ -1237,6 +1324,10 @@ mod tests {
         let parsed: Session = serde_json::from_str(from_ts).unwrap();
         assert_eq!(parsed.project_path, "/p");
         assert_eq!(parsed.version, 1); // normalized to 2 on save
-        assert_eq!(parsed.agent.id, "harness"); // defaulted
+        // v1 sessions carried the personality inline as `id`. The
+        // v3 deserializer (this revision) keeps the legacy field
+        // around for back-compat reads but no longer treats the value
+        // as a personality id — the chat is always the Orchestrator.
+        assert_eq!(parsed.agent.id.as_deref(), Some("harness"));
     }
 }

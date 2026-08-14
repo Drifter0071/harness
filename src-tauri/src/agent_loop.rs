@@ -1,4 +1,4 @@
-//! Rust-owned agent turn loop (spec §4, §5).
+﻿//! Rust-owned agent turn loop (spec Â§4, Â§5).
 //!
 //! One `run_agent_turn` call drives a complete agent turn: stream the
 //! provider response, execute requested tool calls through the policy gate
@@ -24,15 +24,18 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent::AgentRole;
 use crate::llm_client::{
     complete_with_tools, AgentTurnError, ChatUsage, ToolCall, ToolChatMessage, ToolChatRequest,
     ToolSpec, TurnOutcome,
 };
+use crate::models::ReasoningEffort;
 use crate::secrets::SecretStore;
 use crate::session::{
-    save_session, ActionMode, Message, Session, TokenStats, ToolActivity, ToolActivityStatus,
+    save_session, ActionMode, LastTurn, Message, Session, TokenStats, ToolActivity,
+    ToolActivityStatus,
 };
-use crate::tools::{execute_tool, ToolResult};
+use crate::tools::{execute_tool, ToolContext, ToolResult};
 
 /// Hard cap on LLM rounds inside one turn (each round may execute tools).
 const MAX_ROUNDS: usize = 24;
@@ -58,6 +61,16 @@ struct TurnStartEvent<'a> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChunkEvent<'a> {
+    request_id: &'a str,
+    delta: &'a str,
+}
+
+/// Chain-of-thought delta. Emitted alongside `agent-chunk` for
+/// thinking-capable models; the frontend buffers these into a hidden
+/// collapsible "Thinking" block on the assistant message.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReasoningEvent<'a> {
     request_id: &'a str,
     delta: &'a str,
 }
@@ -104,6 +117,9 @@ struct ApprovalResultEvent<'a> {
 struct DoneEvent<'a> {
     request_id: &'a str,
     content: &'a str,
+    /// Full chain-of-thought captured for thinking-capable models.
+    #[serde(default, skip_serializing_if = "str::is_empty")]
+    reasoning: &'a str,
     usage: ChatUsage,
 }
 
@@ -124,7 +140,9 @@ pub trait AgentEventSink: Send + Sync {
 }
 
 /// Completes one provider turn. The boxed-future pattern keeps the trait
-/// object-safe without pulling in async-trait.
+/// object-safe without pulling in async-trait. `text_cb` receives the
+/// visible answer deltas; `reasoning_cb` receives chain-of-thought
+/// deltas (no-op for models that don't emit reasoning).
 pub trait TurnCompleter: Send + Sync {
     #[allow(clippy::type_complexity)]
     fn complete(
@@ -132,6 +150,7 @@ pub trait TurnCompleter: Send + Sync {
         request: ToolChatRequest,
         tools: Vec<ToolSpec>,
         text_cb: Box<dyn Fn(&str) + Send>,
+        reasoning_cb: Box<dyn Fn(&str) + Send>,
         cancel_rx: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>>;
 }
@@ -154,11 +173,20 @@ impl TurnCompleter for LlmClientTurner {
         request: ToolChatRequest,
         tools: Vec<ToolSpec>,
         text_cb: Box<dyn Fn(&str) + Send>,
+        reasoning_cb: Box<dyn Fn(&str) + Send>,
         cancel_rx: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>> {
         let secrets = Arc::clone(&self.secrets);
         Box::pin(async move {
-            complete_with_tools(&request, &tools, secrets.as_ref(), text_cb, cancel_rx).await
+            complete_with_tools(
+                &request,
+                &tools,
+                secrets.as_ref(),
+                text_cb,
+                reasoning_cb,
+                cancel_rx,
+            )
+            .await
         })
     }
 }
@@ -184,7 +212,7 @@ impl AgentEventSink for AppEventSink {
 
 /// Per-turn cancellation: the sender is registered in the `in_flight` map
 /// so `cancel_agent(request_id)` can flip it; the loop races `changed()` /
-/// `wait_for()` at every await. Watch receivers are "sticky" — a cancel sent
+/// `wait_for()` at every await. Watch receivers are "sticky" â€” a cancel sent
 /// between awaits is observed at the next await, so no cancellation is lost.
 fn new_cancel_token() -> (watch::Sender<bool>, watch::Receiver<bool>) {
     watch::channel(false)
@@ -224,7 +252,7 @@ fn is_mutating(name: &str) -> bool {
 
 /// Rebuild the provider history from persisted session messages. Tool-granular
 /// `role:"tool"` records are not persisted (they live in `activities`), so a
-/// fresh turn replays user/assistant text only — the assistant summary carries
+/// fresh turn replays user/assistant text only â€” the assistant summary carries
 /// the state across turns. Within a turn, the loop keeps the full
 /// assistant-echo + tool-result sequence in `messages` so OpenAI accepts
 /// multi-round tool use.
@@ -242,8 +270,12 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
         .collect()
 }
 
-fn build_system_prompt(session: &Session, workspace: &str, goal_mode: bool) -> String {
-    let mut prompt = session.agent.system_prompt.clone();
+fn build_system_prompt(
+    orchestrator_prompt: &str,
+    workspace: &str,
+    goal_mode: bool,
+) -> String {
+    let mut prompt = orchestrator_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
     prompt.push_str(
@@ -263,16 +295,18 @@ fn build_system_prompt(session: &Session, workspace: &str, goal_mode: bool) -> S
 }
 
 fn build_request(
-    session: &Session,
-    model_id: &str,
-    workspace: &str,
-    goal_mode: bool,
+    resolved_model_id: &str,
+    system_prompt: String,
+    _workspace: &str,
+    _goal_mode: bool,
     messages: &[ToolChatMessage],
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> ToolChatRequest {
     ToolChatRequest {
-        model_id: model_id.to_string(),
-        system_prompt: build_system_prompt(session, workspace, goal_mode),
+        model_id: resolved_model_id.to_string(),
+        system_prompt,
         messages: messages.to_vec(),
+        reasoning_effort,
     }
 }
 
@@ -289,7 +323,7 @@ fn merge_usage(stats: &mut Option<TokenStats>, usage: &ChatUsage) {
     });
     s.last_in = usage.input;
     s.last_out = usage.output;
-    // `cumulativeIn` is the peak input size, not a sum (spec §4.5).
+    // `cumulativeIn` is the peak input size, not a sum (spec Â§4.5).
     s.cumulative_in = s.cumulative_in.max(usage.input);
     s.cumulative_out = s.cumulative_out.saturating_add(usage.output);
 }
@@ -309,28 +343,69 @@ fn user_message(session: &mut Session, text: &str) {
         mentions: Vec::new(),
         agent_id: None,
         agent_name: None,
+        reasoning: None,
     });
 }
 
-fn assistant_message(session: &mut Session, text: &str) {
-    session.messages.push(Message {
-        id: Uuid::new_v4().to_string(),
+/// Append a final assistant message to the session using a caller-supplied
+/// id. The agent loop passes the request-id-based placeholder id
+/// (`agent-<requestId>`) that the frontend pre-inserts into the store, so
+/// the persisted message and the in-memory placeholder stay the same
+/// row. Without this, the assistant text lands in a fresh-UUID message
+/// while the placeholder stays empty in the session file â€” which is
+/// Persist the final assistant message for the turn. This is an
+/// UPSERT, not an append: multi-round turns previously pushed one
+/// message per round under the same `agent-<requestId>` id, which
+/// persisted a stack of blank assistant rows for tool rounds (each
+/// round's empty or interim text) and made reloaded sessions show
+/// empty bubbles. Replacing the row keeps exactly one assistant
+/// message per turn â€” the final answer.
+///
+/// `resolved` is the personality bundle computed at the start of
+/// the turn; we use its `personality_id` + `name` (not the session
+/// snapshot) because those are the values the user sees in the
+/// chat header.
+fn assistant_message_with_id_and_reasoning(
+    session: &mut Session,
+    text: &str,
+    id: String,
+    reasoning: Option<String>,
+    resolved: &ResolvedAgent,
+) {
+    let reasoning = reasoning.filter(|r| !r.is_empty());
+    let msg = Message {
+        id: id.clone(),
         role: "assistant".into(),
         content: text.to_string(),
         timestamp: now_iso(),
         mentions: Vec::new(),
-        agent_id: Some(session.agent.id.clone()),
-        agent_name: Some(session.agent.name.clone()),
-    });
+        agent_id: Some(resolved.personality_id.clone()),
+        agent_name: Some(resolved.name.clone()),
+        reasoning,
+    };
+    if let Some(existing) = session.messages.iter_mut().find(|m| m.id == id) {
+        *existing = msg;
+    } else {
+        session.messages.push(msg);
+    }
 }
 
-fn push_activity(session: &mut Session, tool: &str, summary: String, status: ToolActivityStatus) {
+fn push_activity(
+    session: &mut Session,
+    tool: &str,
+    summary: String,
+    status: ToolActivityStatus,
+    request_id: Option<&str>,
+    arguments: Option<&Value>,
+) {
     session.activities.push(ToolActivity {
         id: Uuid::new_v4().to_string(),
         tool: tool.to_string(),
         summary,
         status,
         timestamp: now_iso(),
+        request_id: request_id.map(|s| s.to_string()),
+        arguments: arguments.cloned(),
     });
 }
 
@@ -344,6 +419,33 @@ async fn persist(session: &mut Session) {
             session.id, e
         );
     }
+}
+
+/// Stamp the `lastTurn` marker onto the session and persist. Called on
+/// every terminal transition (done / error) so the session file becomes a
+/// self-describing record of "the turn with this requestId ended in this
+/// status at this time" â€” independent of the in-process Tauri event bus.
+///
+/// The frontend uses this as a disk-based completion signal when
+/// streaming events don't reach the WebView, so responses still appear
+/// without a manual refresh.
+async fn mark_turn_complete(session: &mut Session, request_id: &str, status: &str) {
+    mark_turn_complete_with_reasoning(session, request_id, status, None).await;
+}
+
+async fn mark_turn_complete_with_reasoning(
+    session: &mut Session,
+    request_id: &str,
+    status: &str,
+    reasoning: Option<String>,
+) {
+    session.last_turn = Some(LastTurn {
+        request_id: request_id.to_string(),
+        status: status.to_string(),
+        at: now_iso(),
+        reasoning: reasoning.filter(|r| !r.is_empty()),
+    });
+    persist(session).await;
 }
 
 // -- Stall detection --
@@ -398,6 +500,7 @@ pub fn run_agent_turn(
     pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
     in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
     completer: Arc<dyn TurnCompleter>,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> JoinHandle<()> {
     tokio::spawn(run_agent_turn_inner(
         request_id,
@@ -411,20 +514,53 @@ pub fn run_agent_turn(
         pending_approvals,
         in_flight,
         completer,
+        reasoning_effort,
     ))
 }
 
 /// How a turn ended, after the final message is persisted.
 enum TurnFinish {
-    Done { content: String, usage: ChatUsage },
-    Error { kind: String, message: String },
+    Done {
+        content: String,
+        reasoning: String,
+        usage: ChatUsage,
+    },
+    Error {
+        kind: String,
+        message: String,
+    },
+}
+
+/// Resolved chat-agent bundle for a turn. After the v3
+/// chat-agent-as-orchestrator refactor, every chat turn is the
+/// Orchestrator; the per-turn bundle carries the orchestrator's
+/// stable id / name (used to label assistant messages), the role
+/// (used to gate role-restricted tools), the orchestrator's system
+/// prompt, and the model id the frontend picked for chat.
+#[derive(Debug, Clone)]
+struct ResolvedAgent {
+    /// Stable id used to label messages and session summary.
+    /// Always `ORCHESTRATOR_AGENT_ID` ("orchestrator").
+    personality_id: String,
+    /// Human-readable label for the chat agent.
+    name: String,
+    /// The chat agent's role â€” always `AgentRole::Orchestrator` â€”
+    /// threaded into the tool context so role-gated tools (like
+    /// `bip`) can check the caller's role.
+    role: AgentRole,
+    /// The orchestrator's system prompt (code constant).
+    system_prompt: String,
+    /// The model id the frontend picked for chat. The chat agent
+    /// doesn't use per-personality model overrides (those are for
+    /// subagent dispatch, future work).
+    model_id: String,
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_turn_inner(
     request_id: String,
     mut session: Session,
-    model_id: String,
+    chat_model_id: String,
     message_text: String,
     action_mode: ActionMode,
     goal_mode: bool,
@@ -433,11 +569,26 @@ async fn run_agent_turn_inner(
     pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
     in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
     completer: Arc<dyn TurnCompleter>,
+    reasoning_effort: Option<ReasoningEffort>,
 ) {
+    // The chat agent is always the Orchestrator. The orchestrator's
+    // system prompt is a code constant; the chat model is whatever the
+    // frontend passed in (`run_agent_turn`). Subagent personalities
+    // (Coder, Architect, Researcher, HealthMonitor) live in the global
+    // roster and are read live by the future subagent dispatch loop
+    // (out of scope for v0).
+    let resolved = ResolvedAgent {
+        personality_id: crate::session::ORCHESTRATOR_AGENT_ID.to_string(),
+        name: "Orchestrator".to_string(),
+        role: AgentRole::Orchestrator,
+        system_prompt: crate::agent::ORCHESTRATOR_PROMPT.to_string(),
+        model_id: chat_model_id.clone(),
+    };
+
     let outcome = run_turn_core(
         &request_id,
         &mut session,
-        &model_id,
+        &resolved,
         &message_text,
         &action_mode,
         goal_mode,
@@ -446,6 +597,7 @@ async fn run_agent_turn_inner(
         &pending_approvals,
         &in_flight,
         completer.as_ref(),
+        reasoning_effort,
     )
     .await;
 
@@ -453,12 +605,17 @@ async fn run_agent_turn_inner(
     // emit the terminal event.
     let _ = in_flight.remove(&request_id);
     match outcome {
-        Ok(TurnFinish::Done { content, usage }) => {
+        Ok(TurnFinish::Done {
+            content,
+            reasoning,
+            usage,
+        }) => {
             sink.emit(
                 "agent-done",
                 json!(DoneEvent {
                     request_id: &request_id,
                     content: &content,
+                    reasoning: &reasoning,
                     usage
                 }),
             );
@@ -474,6 +631,17 @@ async fn run_agent_turn_inner(
             );
         }
         Err(()) => {
+            // Cancellation happened before the loop's `mark_turn_complete`
+            // ran. Stamp the marker here so the session file still carries
+            // a completion signal and the frontend can clear the
+            // placeholder.
+            session.last_turn = Some(LastTurn {
+                request_id: request_id.clone(),
+                status: "cancelled".to_string(),
+                at: now_iso(),
+                reasoning: None,
+            });
+            let _ = save_session(&session.project_path, session.clone()).await;
             sink.emit(
                 "agent-error",
                 json!(ErrorEvent {
@@ -490,7 +658,7 @@ async fn run_agent_turn_inner(
 async fn run_turn_core(
     request_id: &str,
     session: &mut Session,
-    model_id: &str,
+    resolved: &ResolvedAgent,
     message_text: &str,
     action_mode: &ActionMode,
     goal_mode: bool,
@@ -499,9 +667,19 @@ async fn run_turn_core(
     pending_approvals: &Arc<DashMap<String, oneshot::Sender<bool>>>,
     in_flight: &Arc<DashMap<String, watch::Sender<bool>>>,
     completer: &dyn TurnCompleter,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<TurnFinish, ()> {
     let (cancel_tx, mut cancel_rx) = new_cancel_token();
     in_flight.insert(request_id.to_string(), cancel_tx);
+
+    // Clear any stale `lastTurn` marker from a previous turn. The watcher
+    // re-reads the session on every persist; without this, a re-read
+    // during the new turn would see the old `done` and apply a stale
+    // terminal event.
+    if session.last_turn.is_some() {
+        session.last_turn = None;
+        persist(session).await;
+    }
 
     sink.emit("agent-turn-start", json!(TurnStartEvent { request_id }));
 
@@ -528,12 +706,21 @@ async fn run_turn_core(
                 session,
                 "loop_cap",
                 "Agent turn exceeded the maximum number of LLM rounds",
+                Some(request_id),
             )
             .await);
         }
 
         // -- Provider call, raced against cancellation --
-        let request = build_request(session, model_id, workspace, goal_mode, &messages);
+        let system_prompt = build_system_prompt(&resolved.system_prompt, workspace, goal_mode);
+        let request = build_request(
+            &resolved.model_id,
+            system_prompt,
+            workspace,
+            goal_mode,
+            &messages,
+            reasoning_effort,
+        );
         let text_cb: Box<dyn Fn(&str) + Send> = {
             let sink = Arc::clone(sink);
             let request_id = request_id.to_string();
@@ -541,6 +728,19 @@ async fn run_turn_core(
                 sink.emit(
                     "agent-chunk",
                     json!(ChunkEvent {
+                        request_id: &request_id,
+                        delta,
+                    }),
+                );
+            })
+        };
+        let reasoning_cb: Box<dyn Fn(&str) + Send> = {
+            let sink = Arc::clone(sink);
+            let request_id = request_id.to_string();
+            Box::new(move |delta: &str| {
+                sink.emit(
+                    "agent-reasoning",
+                    json!(ReasoningEvent {
                         request_id: &request_id,
                         delta,
                     }),
@@ -575,7 +775,8 @@ async fn run_turn_core(
                 }
             }
         };
-        let llm_fut = completer.complete(request, tools.clone(), text_cb, cancel_pass);
+        let llm_fut =
+            completer.complete(request, tools.clone(), text_cb, reasoning_cb, cancel_pass);
         let outcome = tokio::select! {
             biased;
             _ = cancel_fut => {
@@ -585,7 +786,7 @@ async fn run_turn_core(
                 Ok(o) => o,
                 Err(e) => {
                     let (kind, msg) = error_vocab(&e);
-                    return Ok(finish_error(session, kind, msg).await);
+                    return Ok(finish_error(session, kind, msg, Some(request_id)).await);
                 }
             }
         };
@@ -599,7 +800,19 @@ async fn run_turn_core(
         } else {
             outcome.text.clone()
         };
-        assistant_message(session, &final_text);
+        // Use the request-id-prefixed placeholder id so the persisted
+        // assistant message matches the one the frontend already inserted
+        // in its in-memory store. Without this they are two different
+        // rows and the user's session file shows an empty assistant
+        // message until a reload.
+        let reasoning = (!outcome.reasoning.is_empty()).then(|| outcome.reasoning.clone());
+        assistant_message_with_id_and_reasoning(
+            session,
+            &final_text,
+            format!("agent-{request_id}"),
+            reasoning,
+            resolved,
+        );
         merge_usage(&mut session.token_stats, &outcome.usage);
         persist(session).await;
 
@@ -630,6 +843,7 @@ async fn run_turn_core(
                     request_id,
                     session,
                     workspace,
+                    &resolved,
                     call,
                     &mut messages,
                     sink,
@@ -642,6 +856,7 @@ async fn run_turn_core(
                     session,
                     "stalled",
                     format!("Agent repeated the same {} call without effect", name),
+                    Some(request_id),
                 )
                 .await);
             }
@@ -656,6 +871,7 @@ async fn run_turn_core(
                     session,
                     "loop_cap",
                     "Goal loop exceeded the maximum number of continuation turns",
+                    Some(request_id),
                 )
                 .await);
             }
@@ -670,8 +886,14 @@ async fn run_turn_core(
             continue;
         }
 
+        // Terminal: stamp the disk marker before returning so the session
+        // file reflects completion even if the in-process Tauri event never
+        // reaches the WebView.
+        let reasoning = (!outcome.reasoning.is_empty()).then(|| outcome.reasoning.clone());
+        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning).await;
         return Ok(TurnFinish::Done {
             content: final_text,
+            reasoning: outcome.reasoning,
             usage: outcome.usage,
         });
     }
@@ -682,7 +904,7 @@ fn error_vocab(e: &AgentTurnError) -> (&'static str, String) {
         AgentTurnError::Auth(m) => ("auth", m.clone()),
         AgentTurnError::RateLimited(_) => (
             "rate_limited",
-            "Provider rate limit hit — try again shortly".into(),
+            "Provider rate limit hit â€” try again shortly".into(),
         ),
         AgentTurnError::Network(m) => ("network", m.clone()),
         AgentTurnError::Provider(m) => ("provider", m.clone()),
@@ -693,16 +915,29 @@ fn error_vocab(e: &AgentTurnError) -> (&'static str, String) {
 }
 
 /// Record a turn-terminating error as an activity and persist, so the UI can
-/// show why a turn stopped even after the terminal event.
-async fn finish_error(session: &mut Session, kind: &str, message: impl Into<String>) -> TurnFinish {
+/// show why a turn stopped even after the terminal event. Also stamps the
+/// `lastTurn` marker with the request id (if provided) so the session file
+/// carries the completion signal.
+async fn finish_error(
+    session: &mut Session,
+    kind: &str,
+    message: impl Into<String>,
+    request_id: Option<&str>,
+) -> TurnFinish {
     let message = message.into();
     push_activity(
         session,
         "agent",
         format!("turn error ({}): {}", kind, message),
         ToolActivityStatus::Error,
+        None,
+        None,
     );
-    persist(session).await;
+    if let Some(rid) = request_id {
+        mark_turn_complete(session, rid, "error").await;
+    } else {
+        persist(session).await;
+    }
     TurnFinish::Error {
         kind: kind.to_string(),
         message,
@@ -768,7 +1003,14 @@ async fn gate_tool(
 
     if !allowed {
         let summary = format!("User denied the {} tool call", call.name);
-        push_activity(session, &call.name, summary, ToolActivityStatus::Denied);
+        push_activity(
+            session,
+            &call.name,
+            summary,
+            ToolActivityStatus::Denied,
+            Some(request_id),
+            Some(&call.arguments),
+        );
         // Feed the denial back as a tool result so the model can pick a
         // different approach instead of repeating the call.
         messages.push(ToolChatMessage {
@@ -790,6 +1032,7 @@ async fn execute_one(
     request_id: &str,
     session: &mut Session,
     workspace: &str,
+    resolved: &ResolvedAgent,
     call: &ToolCall,
     messages: &mut Vec<ToolChatMessage>,
     sink: &Arc<dyn AgentEventSink>,
@@ -805,7 +1048,13 @@ async fn execute_one(
         }),
     );
 
-    let result = match execute_tool(workspace, &call.name, &call.arguments, true).await {
+    let result = match execute_tool(
+        &ToolContext::for_agent(workspace, resolved.role, sink.clone()),
+        &call.name,
+        &call.arguments,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => ToolResult {
             ok: false,
@@ -820,7 +1069,14 @@ async fn execute_one(
         ToolActivityStatus::Error
     };
     let status_name_str = status_name(&status);
-    push_activity(session, &call.name, summary.clone(), status);
+    push_activity(
+        session,
+        &call.name,
+        summary.clone(),
+        status,
+        Some(request_id),
+        Some(&call.arguments),
+    );
     persist(session).await;
 
     // The tool result is the model's context for the next round.
@@ -897,6 +1153,7 @@ mod tests {
             request: ToolChatRequest,
             _tools: Vec<ToolSpec>,
             _text_cb: Box<dyn Fn(&str) + Send>,
+            _reasoning_cb: Box<dyn Fn(&str) + Send>,
             _cancel_rx: oneshot::Receiver<()>,
         ) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>> {
             self.requests.lock().unwrap().push(request.clone());
@@ -905,6 +1162,7 @@ mod tests {
                 next.unwrap_or_else(|| {
                     Ok(TurnOutcome {
                         text: String::new(),
+                        reasoning: String::new(),
                         tool_calls: Vec::new(),
                         usage: ChatUsage {
                             input: 0,
@@ -954,6 +1212,7 @@ mod tests {
             messages: Vec::new(),
             activities: Vec::new(),
             token_stats: None,
+            last_turn: None,
         }
     }
 
@@ -1003,6 +1262,7 @@ mod tests {
             rig.pending.clone(),
             rig.in_flight.clone(),
             completer_dyn,
+            None,
         );
         handle.await.unwrap();
         // Reload the persisted session: validates `persist_turn` too.
@@ -1015,6 +1275,7 @@ mod tests {
     fn text_outcome(text: &str, input: u64, output: u64) -> Result<TurnOutcome, AgentTurnError> {
         Ok(TurnOutcome {
             text: text.into(),
+            reasoning: String::new(),
             tool_calls: Vec::new(),
             usage: ChatUsage { input, output },
         })
@@ -1039,14 +1300,16 @@ mod tests {
         let done = probe(&rig.sink, "agent-done");
         assert_eq!(done.len(), 1);
         assert_eq!(done[0]["content"], "part two");
-        // The persisted assistant text has the marker stripped.
+        // The persisted assistant message is a single row (the loop
+        // upserts per-turn messages instead of pushing one per round),
+        // holding the final answer with the marker stripped.
         let assistant_msgs: Vec<_> = session
             .messages
             .iter()
             .filter(|m| m.role == "assistant")
             .collect();
-        assert_eq!(assistant_msgs.len(), 2);
-        assert_eq!(assistant_msgs[0].content, "part one");
+        assert_eq!(assistant_msgs.len(), 1);
+        assert_eq!(assistant_msgs[0].content, "part two");
         // The second request's last message is the [continue] user marker.
         let requests = completer.requests();
         assert_eq!(requests.len(), 2);
@@ -1072,6 +1335,7 @@ mod tests {
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "checking".into(),
+                reasoning: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call-1".into(),
                     name: "list_dir".into(),
@@ -1120,6 +1384,7 @@ mod tests {
         let completer = Arc::new(MockCompleter::new(vec![
             Ok(TurnOutcome {
                 text: "writing".into(),
+                reasoning: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call-1".into(),
                     name: "write_file".into(),
@@ -1180,6 +1445,7 @@ mod tests {
             .map(|_| {
                 Ok(TurnOutcome {
                     text: "reading again".into(),
+                    reasoning: String::new(),
                     tool_calls: vec![ToolCall {
                         id: "call-1".into(),
                         name: "read_file".into(),
@@ -1212,6 +1478,7 @@ mod tests {
     async fn cancellation_mid_approval_resolves_denied() {
         let completer = Arc::new(MockCompleter::new(vec![Ok(TurnOutcome {
             text: "writing".into(),
+            reasoning: String::new(),
             tool_calls: vec![ToolCall {
                 id: "call-1".into(),
                 name: "write_file".into(),

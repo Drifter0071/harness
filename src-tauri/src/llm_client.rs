@@ -52,6 +52,18 @@ pub struct ChatChunk {
     pub delta: String,
 }
 
+/// Streaming chain-of-thought payload, emitted alongside `chat-chunk`
+/// for thinking-capable models. The frontend buffers these into a
+/// hidden, collapsible "Thinking" block above the assistant message.
+/// Providers that don't expose reasoning (most non-reasoning models)
+/// never emit this event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReasoning {
+    pub request_id: String,
+    pub delta: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatUsage {
@@ -71,6 +83,12 @@ pub struct ChatSessionWindow {
 pub struct ChatDone {
     pub request_id: String,
     pub content: String,
+    /// Full chain-of-thought captured for thinking-capable models.
+    /// The wire `content` field is the visible answer only; the
+    /// streaming `chat-reasoning` events also feed the in-memory
+    /// message but the final on-disk value is this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     pub usage: ChatUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_window: Option<ChatSessionWindow>,
@@ -202,12 +220,14 @@ fn emit_error(
     error: impl Into<String>,
     retry_after: Option<u64>,
 ) {
+    let err_str: String = error.into();
+    eprintln!("[hci:debug] chat-error request_id={request_id} kind={kind} msg={err_str}");
     let _ = app.emit(
         "chat-error",
         ChatError {
             request_id: request_id.to_string(),
             kind: kind.to_string(),
-            error: error.into(),
+            error: err_str,
             retry_after_seconds: retry_after,
         },
     );
@@ -217,6 +237,7 @@ fn emit_done(
     app: &AppHandle,
     request_id: &str,
     content: &str,
+    reasoning: &str,
     usage: ChatUsage,
     session_window: Option<ChatSessionWindow>,
 ) {
@@ -225,6 +246,7 @@ fn emit_done(
         ChatDone {
             request_id: request_id.to_string(),
             content: content.to_string(),
+            reasoning: reasoning.to_string(),
             usage,
             session_window,
         },
@@ -291,6 +313,7 @@ async fn run_anthropic(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut full_content = String::new();
+    let mut full_reasoning = String::new();
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
 
@@ -321,10 +344,26 @@ async fn run_anthropic(
                                 });
                             }
                         }
+                        AnthropicSseEvent::ContentBlockDelta { thinking: Some(thinking), .. } => {
+                            if !thinking.is_empty() {
+                                full_reasoning.push_str(&thinking);
+                                let _ = app.emit("chat-reasoning", ChatReasoning {
+                                    request_id: request.request_id.clone(),
+                                    delta: thinking,
+                                });
+                            }
+                        }
                         AnthropicSseEvent::ContentBlockDelta { .. } => {}
                         AnthropicSseEvent::MessageDelta { usage, .. } => { output_tokens = usage.output_tokens; }
                         AnthropicSseEvent::MessageStop => {
-                            emit_done(app, &request.request_id, &full_content, ChatUsage { input: input_tokens, output: output_tokens }, session_window_from_headers.clone());
+                            emit_done(
+                                app,
+                                &request.request_id,
+                                &full_content,
+                                &full_reasoning,
+                                ChatUsage { input: input_tokens, output: output_tokens },
+                                session_window_from_headers.clone(),
+                            );
                             return Ok(());
                         }
                         AnthropicSseEvent::Error { message } => { emit_error(app, &request.request_id, "provider", message, None); return Ok(()); }
@@ -341,6 +380,7 @@ async fn run_anthropic(
         app,
         &request.request_id,
         &full_content,
+        &full_reasoning,
         ChatUsage {
             input: input_tokens,
             output: output_tokens,
@@ -366,6 +406,7 @@ enum AnthropicSseEvent {
     ContentBlockDelta {
         index: usize,
         text: Option<String>,
+        thinking: Option<String>,
         partial_json: Option<String>,
     },
     ContentBlockStop {
@@ -438,6 +479,10 @@ fn take_sse_event(buffer: &mut String) -> Option<(AnthropicSseEvent, usize)> {
                     .pointer("/delta/text")
                     .and_then(|t| t.as_str())
                     .map(|s| s.to_string());
+                let thinking = v
+                    .pointer("/delta/thinking")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
                 let partial_json = v
                     .pointer("/delta/partial_json")
                     .and_then(|t| t.as_str())
@@ -445,6 +490,7 @@ fn take_sse_event(buffer: &mut String) -> Option<(AnthropicSseEvent, usize)> {
                 AnthropicSseEvent::ContentBlockDelta {
                     index,
                     text,
+                    thinking,
                     partial_json,
                 }
             }
@@ -583,8 +629,31 @@ async fn run_openai(
 ) -> Result<(), String> {
     let client = build_client()?;
     let url = format!("{}/chat/completions", resolved.base_url);
+    eprintln!(
+        "[hci:debug] run_openai url={url} model={} key_len={} msg_count={} thinking_on={} effort={:?}",
+        resolved.record.model_name,
+        resolved.api_key.len(),
+        request.messages.len(),
+        request.thinking_on,
+        request.reasoning_effort,
+    );
 
-    let mut include_reasoning = request.reasoning_effort.is_some();
+    // Resolve the on-the-wire reasoning signal. The OpenAI-compat
+    // surface is `reasoning_effort`; Anthropic uses `thinking`. The
+    // frontend's `thinkingOn` toggle is a "the model can reason, ask
+    // it to" hint. For an OpenAI-compat gateway, that signal is
+    // `reasoning_effort` — so when the user asked for thinking on a
+    // non-effort model, fall back to medium. Without this, thinking
+    // models proxied through OpenAI-compat gateways (Kilo AI, OpenRouter,
+    // etc.) silently return no reasoning content.
+    let effective_effort: Option<ReasoningEffort> = if let Some(e) = request.reasoning_effort {
+        Some(e)
+    } else if request.thinking_on {
+        Some(ReasoningEffort::Medium)
+    } else {
+        None
+    };
+    let mut include_reasoning = effective_effort.is_some();
 
     loop {
         let mut body = serde_json::json!({
@@ -594,7 +663,7 @@ async fn run_openai(
             "stream_options": { "include_usage": true }
         });
         if include_reasoning {
-            if let Some(effort) = request.reasoning_effort {
+            if let Some(effort) = effective_effort {
                 body["reasoning_effort"] = serde_json::json!(effort.as_str());
             }
         }
@@ -640,6 +709,10 @@ async fn run_openai(
             } else {
                 None
             };
+            eprintln!(
+                "[hci:debug] run_openai HTTP {status_code} body={}",
+                body_excerpt(&body_text)
+            );
             emit_error(
                 app,
                 &request.request_id,
@@ -656,6 +729,7 @@ async fn run_openai(
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
         let mut full_content = String::new();
+        let mut full_reasoning = String::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
 
@@ -663,6 +737,7 @@ async fn run_openai(
         let mut cancelled = false;
         let mut provider_err: Option<String> = None;
         let mut stream_err: Option<String> = None;
+        eprintln!("[hci:debug] run_openai stream open, awaiting first byte");
         loop {
             let chunk_fut = stream.next();
             tokio::select! {
@@ -672,8 +747,11 @@ async fn run_openai(
                     let Some(chunk_res) = maybe else { break };
                     let chunk: Bytes = match chunk_res {
                         Ok(c) => c,
-                        Err(e) => { stream_err = Some(e.to_string()); break; }
+                        Err(e) => { eprintln!("[hci:debug] run_openai stream error: {e}"); stream_err = Some(e.to_string()); break; }
                     };
+                    if full_content.is_empty() && !chunk.is_empty() {
+                        eprintln!("[hci:debug] run_openai first chunk ({} bytes)", chunk.len());
+                    }
                     buffer.push_str(&String::from_utf8_lossy(&chunk));
                     while let Some(line) = take_sse_data_line(&mut buffer) {
                         if line == "[DONE]" { done = true; break; }
@@ -684,7 +762,34 @@ async fn run_openai(
                             break;
                         }
                         if let Some(choice) = parsed.pointer("/choices/0") {
-                            if let Some(text) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
+                            // Some OpenAI-compatible providers (notably
+                            // reasoning models proxied through gateways
+                            // like Kilo AI) return the model's reasoning
+                            // in `delta.reasoning_content` and the final
+                            // answer in `delta.content`. The two streams
+                            // are kept separate on the wire:
+                            //   - reasoning → `chat-reasoning`
+                            //   - text → `chat-chunk`
+                            // The on-disk `chat-done.content` is the
+                            // visible answer only, so the chat scroll
+                            // stays clean and the reasoning lives in a
+                            // collapsible "Thinking" block.
+                            if let Some(text) = choice
+                                .pointer("/delta/reasoning_content")
+                                .and_then(|c| c.as_str())
+                            {
+                                if !text.is_empty() {
+                                    full_reasoning.push_str(text);
+                                    let _ = app.emit("chat-reasoning", ChatReasoning {
+                                        request_id: request.request_id.clone(),
+                                        delta: text.to_string(),
+                                    });
+                                }
+                            }
+                            if let Some(text) = choice
+                                .pointer("/delta/content")
+                                .and_then(|c| c.as_str())
+                            {
                                 if !text.is_empty() {
                                     full_content.push_str(text);
                                     let _ = app.emit("chat-chunk", ChatChunk {
@@ -732,6 +837,7 @@ async fn run_openai(
             app,
             &request.request_id,
             &full_content,
+            &full_reasoning,
             ChatUsage {
                 input: input_tokens,
                 output: output_tokens,
@@ -955,6 +1061,10 @@ pub struct ToolCall {
 #[serde(rename_all = "camelCase")]
 pub struct TurnOutcome {
     pub text: String,
+    /// Full chain-of-thought accumulated across the streaming deltas.
+    /// Empty when the model didn't emit reasoning content.
+    #[serde(default)]
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: ChatUsage,
 }
@@ -979,6 +1089,12 @@ pub struct ToolChatRequest {
     pub model_id: String,
     pub system_prompt: String,
     pub messages: Vec<ToolChatMessage>,
+    /// Optional reasoning-effort hint carried over from the user's
+    /// model prefs. Forwarded to OpenAI-compat gateways as
+    /// `reasoning_effort` so the model returns `delta.reasoning_content`
+    /// for the chain-of-thought display. `None` for non-reasoning
+    /// models or when the user has reasoning turned off.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Agent-loop error vocabulary; the loop maps these to `agent-error` events.
@@ -994,12 +1110,15 @@ pub enum AgentTurnError {
 }
 
 /// Run one tool-capable turn. `text_cb` receives content deltas as they
-/// stream; cancellation races the stream and returns `Cancelled`.
+/// stream; `reasoning_cb` receives chain-of-thought deltas (no-op when
+/// the model doesn't emit reasoning). Cancellation races the stream
+/// and returns `Cancelled`.
 pub async fn complete_with_tools(
     request: &ToolChatRequest,
     tools: &[ToolSpec],
     secrets: &dyn SecretStore,
     text_cb: impl Fn(&str),
+    reasoning_cb: impl Fn(&str),
     cancel_rx: oneshot::Receiver<()>,
 ) -> Result<TurnOutcome, AgentTurnError> {
     let resolved = resolve(secrets, &request.model_id).await.map_err(|e| {
@@ -1011,7 +1130,7 @@ pub async fn complete_with_tools(
     })?;
     match resolved.record.format.as_str() {
         "openai-chat-completions" => {
-            run_openai_tools(request, tools, &resolved, text_cb, cancel_rx).await
+            run_openai_tools(request, tools, &resolved, text_cb, reasoning_cb, cancel_rx).await
         }
         other => Err(AgentTurnError::BadRequest(format!(
             "Tool calling not implemented for format: {}",
@@ -1025,18 +1144,22 @@ async fn run_openai_tools(
     tools: &[ToolSpec],
     resolved: &ResolvedModel,
     text_cb: impl Fn(&str),
-    mut cancel_rx: oneshot::Receiver<()>,
+    reasoning_cb: impl Fn(&str),
+    cancel_rx: oneshot::Receiver<()>,
 ) -> Result<TurnOutcome, AgentTurnError> {
     let client = build_client().map_err(AgentTurnError::Internal)?;
     let url = format!("{}/chat/completions", resolved.base_url);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": resolved.record.model_name,
         "messages": build_openai_tool_messages(request),
         "tools": tools.iter().map(tool_spec_to_openai).collect::<Vec<_>>(),
         "stream": true,
         "stream_options": { "include_usage": true }
     });
+    if let Some(effort) = request.reasoning_effort {
+        body["reasoning_effort"] = serde_json::json!(effort.as_str());
+    }
 
     let resp = client
         .post(&url)
@@ -1052,16 +1175,66 @@ async fn run_openai_tools(
         let status_code = status.as_u16();
         let headers = resp.headers().clone();
         let body_text = resp.text().await.unwrap_or_default();
+        // Some OpenAI-compat gateways reject the reasoning_effort
+        // field on tool-capable requests even when they accept it on
+        // plain chat calls. Retry once without it rather than fail
+        // the whole turn.
+        if status_code == 400
+            && request.reasoning_effort.is_some()
+            && body_text.to_lowercase().contains("reasoning_effort")
+        {
+            let mut retry_body = body.clone();
+            retry_body
+                .as_object_mut()
+                .map(|m| m.remove("reasoning_effort"));
+            let resp = client
+                .post(&url)
+                .header("authorization", format!("Bearer {}", resolved.api_key))
+                .header("content-type", "application/json")
+                .json(&retry_body)
+                .send()
+                .await
+                .map_err(|e| agent_network_error(&e))?;
+            if !resp.status().is_success() {
+                let sc = resp.status().as_u16();
+                let h = resp.headers().clone();
+                let bt = resp.text().await.unwrap_or_default();
+                return Err(status_to_agent_error(sc, &bt, &h));
+            }
+            return stream_openai_tools_response(
+                resp,
+                request,
+                tools,
+                text_cb,
+                reasoning_cb,
+                cancel_rx,
+            )
+            .await;
+        }
         return Err(status_to_agent_error(status_code, &body_text, &headers));
     }
 
+    stream_openai_tools_response(resp, request, tools, text_cb, reasoning_cb, cancel_rx).await
+}
+
+/// Shared streaming body for the agent path. Extracted so the
+/// `reasoning_effort` retry in [`run_openai_tools`] can reuse it
+/// without duplicating the SSE parser.
+async fn stream_openai_tools_response(
+    resp: reqwest::Response,
+    _request: &ToolChatRequest,
+    _tools: &[ToolSpec],
+    text_cb: impl Fn(&str),
+    reasoning_cb: impl Fn(&str),
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> Result<TurnOutcome, AgentTurnError> {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut full_text = String::new();
+    let mut full_reasoning = String::new();
     let mut acc = OpenAiToolCallAccumulator::default();
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
-    let mut tool_calls_finish = false;
 
     'stream: loop {
         let chunk_fut = stream.next();
@@ -1090,6 +1263,17 @@ async fn run_openai_tools(
                         return Err(AgentTurnError::Provider(msg));
                     }
                     if let Some(choice) = parsed.pointer("/choices/0") {
+                        // Reasoning content (when the provider returns it)
+                        // is kept separate from the visible answer.
+                        if let Some(text) = choice
+                            .pointer("/delta/reasoning_content")
+                            .and_then(|c| c.as_str())
+                        {
+                            if !text.is_empty() {
+                                full_reasoning.push_str(text);
+                                reasoning_cb(text);
+                            }
+                        }
                         if let Some(text) = choice
                             .pointer("/delta/content")
                             .and_then(|c| c.as_str())
@@ -1101,14 +1285,6 @@ async fn run_openai_tools(
                         }
                         if let Some(delta) = choice.get("delta") {
                             acc.apply_delta(delta);
-                        }
-                        if let Some(reason) = choice
-                            .pointer("/finish_reason")
-                            .and_then(|r| r.as_str())
-                        {
-                            if reason == "tool_calls" {
-                                tool_calls_finish = true;
-                            }
                         }
                     }
                     if let Some(usage) = parsed.get("usage") {
@@ -1128,17 +1304,20 @@ async fn run_openai_tools(
         input: input_tokens,
         output: output_tokens,
     };
+    // Execute whatever tool calls the stream accumulated. The previous
+    // code only forwarded them when the final chunk reported
+    // `finish_reason: "tool_calls"` — but many OpenAI-compat gateways
+    // (OpenRouter, Kilo AI, local servers, …) omit that reason or send
+    // `"stop"` even when tool calls were made. The calls were then
+    // silently dropped and the turn ended with an empty answer, which
+    // is the "model sees the tools but tool use returns a blank
+    // response" bug. The accumulator already drops fragments that never
+    // got an id/name, so forwarding unconditionally is safe.
     let tool_calls = acc.finish();
-    if tool_calls_finish && !tool_calls.is_empty() {
-        return Ok(TurnOutcome {
-            text: full_text,
-            tool_calls,
-            usage,
-        });
-    }
     Ok(TurnOutcome {
         text: full_text,
-        tool_calls: Vec::new(),
+        reasoning: full_reasoning,
+        tool_calls,
         usage,
     })
 }
@@ -1184,9 +1363,17 @@ impl OpenAiToolCallAccumulator {
     pub fn finish(&self) -> Vec<ToolCall> {
         self.by_index
             .iter()
-            .filter(|(id, name, _)| !id.is_empty() && !name.is_empty())
-            .map(|(id, name, args)| ToolCall {
-                id: id.clone(),
+            .enumerate()
+            .filter(|(_, (_, name, _))| !name.is_empty())
+            .map(|(i, (id, name, args))| ToolCall {
+                // Some providers never stream the call id. Synthesize a
+                // stable one so the tool result can pair back through
+                // `tool_call_id` on the next round.
+                id: if id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    id.clone()
+                },
                 name: name.clone(),
                 arguments: parse_arguments(args),
             })
@@ -1297,6 +1484,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
+            reasoning_effort: None,
         }
     }
 
@@ -1394,6 +1582,26 @@ mod tests {
             "tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]
         }));
         assert!(acc.finish().is_empty());
+    }
+
+    #[test]
+    fn openai_accumulator_synthesizes_missing_ids() {
+        // Some providers never stream a call id; the call must still be
+        // returned (with a synthesized id) so the loop can execute it
+        // and pair the tool result back.
+        let mut acc = OpenAiToolCallAccumulator::default();
+        acc.apply_delta(&serde_json::json!({
+            "tool_calls": [
+                {"index": 0, "function": {"name": "read_file", "arguments": "{\"path\":\"a.rs\"}"}},
+                {"index": 1, "id": "call_real", "function": {"name": "list_dir", "arguments": "{}"}}
+            ]
+        }));
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_0");
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[1].id, "call_real");
+        assert_eq!(calls[1].name, "list_dir");
     }
 
     #[test]

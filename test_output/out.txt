@@ -1,0 +1,247 @@
+﻿cargo :    Compiling harness v0.1.0 (C:\Users\garvangel\Documents\GitHub\harness\src-tauri)
+At line:1 char:165
++ ... ss\src-tauri; cargo test --lib hci:: -- --test-threads=1 2>&1 | Out-F ...
++                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ha...ness\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: struct `SessionSnapshot` is never constructed
+  --> src\health_agent.rs:60:12
+   |
+60 | pub struct SessionSnapshot {
+   |            ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `cfg`, `router`, `rpc_ctx`, and `join` are never read
+   --> src\health_agent.rs:116:5
+    |
+115 | pub struct HealthAgent {
+    |            ----------- fields in this struct
+116 |     cfg: HealthConfig,
+    |     ^^^
+117 |     router: Arc<Router>,
+    |     ^^^^^^
+118 |     rpc_ctx: RpcContext,
+    |     ^^^^^^^
+119 |     shutdown: Arc<Notify>,
+120 |     join: Option<JoinHandle<()>>,
+    |     ^^^^
+
+warning: methods `config`, `update_config`, `router`, `rpc_ctx`, and `in_process_conn` are never used
+   --> src\health_agent.rs:184:12
+    |
+135 | impl HealthAgent {
+    | ---------------- methods in this implementation
+...
+184 |     pub fn config(&self) -> &HealthConfig {
+    |            ^^^^^^
+...
+190 |     pub fn update_config(&mut self, cfg: HealthConfig) {
+    |            ^^^^^^^^^^^^^
+...
+201 |     pub fn router(&self) -> Arc<Router> {
+    |            ^^^^^^
+...
+208 |     pub fn rpc_ctx(&self) -> RpcContext {
+    |            ^^^^^^^
+...
+220 |     pub fn in_process_conn(&self) -> ConnectionCtx {
+    |            ^^^^^^^^^^^^^^^
+
+warning: function `build_router` is never used
+  --> src\hci\integration.rs:17:8
+   |
+17 | pub fn build_router() -> Router {
+   |        ^^^^^^^^^^^^
+
+warning: function `build_rpc_context` is never used
+  --> src\hci\integration.rs:52:8
+   |
+52 | pub fn build_rpc_context(
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: field `inner` is never read
+  --> src\hci\methods_canvas.rs:23:5
+   |
+22 | pub struct CanvasEventBus {
+   |            -------------- field in this struct
+23 |     inner: Arc<broadcast::Sender<Value>>,
+   |     ^^^^^
+   |
+   = note: `CanvasEventBus` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead cod
+e analysis
+
+warning: methods `subscribe` and `publish` are never used
+  --> src\hci\methods_canvas.rs:37:12
+   |
+32 | impl CanvasEventBus {
+   | ------------------- methods in this implementation
+...
+37 |     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+   |            ^^^^^^^^^
+...
+42 |     pub fn publish(&self, event: Value) {
+   |            ^^^^^^^
+
+warning: struct `SnapshotHandler` is never constructed
+  --> src\hci\methods_canvas.rs:47:12
+   |
+47 | pub struct SnapshotHandler;
+   |            ^^^^^^^^^^^^^^^
+
+warning: struct `SubscribeHandler` is never constructed
+  --> src\hci\methods_canvas.rs:68:12
+   |
+68 | pub struct SubscribeHandler;
+   |            ^^^^^^^^^^^^^^^^
+
+warning: function `register` is never used
+  --> src\hci\methods_canvas.rs:84:8
+   |
+84 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+   |        ^^^^^^^^
+
+warning: struct `SessionListHandler` is never constructed
+  --> src\hci\methods_sessions_agents.rs:10:12
+   |
+10 | pub struct SessionListHandler;
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SessionGetHandler` is never constructed
+  --> src\hci\methods_sessions_agents.rs:33:12
+   |
+33 | pub struct SessionGetHandler;
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `AgentListHandler` is never constructed
+  --> src\hci\methods_sessions_agents.rs:59:12
+   |
+59 | pub struct AgentListHandler;
+   |            ^^^^^^^^^^^^^^^^
+
+warning: struct `AgentGetHandler` is never constructed
+  --> src\hci\methods_sessions_agents.rs:88:12
+   |
+88 | pub struct AgentGetHandler;
+   |            ^^^^^^^^^^^^^^^
+
+warning: function `register` is never used
+   --> src\hci\methods_sessions_agents.rs:118:8
+    |
+118 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+    |        ^^^^^^^^
+
+warning: function `register` is never used
+  --> src\hci\methods_system.rs:56:8
+   |
+56 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+   |        ^^^^^^^^
+
+warning: constant `SEARCH_MAX_RESULTS` is never used
+  --> src\hci\methods_workspace.rs:12:7
+   |
+12 | const SEARCH_MAX_RESULTS: usize = 200;
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SearchHandler` is never constructed
+   --> src\hci\methods_workspace.rs:109:12
+    |
+109 | pub struct SearchHandler;
+    |            ^^^^^^^^^^^^^
+
+warning: function `register` is never used
+   --> src\hci\methods_workspace.rs:136:8
+    |
+136 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+    |        ^^^^^^^^
+
+warning: fields `app` and `canvas_bus` are never read
+  --> src\hci\router.rs:47:9
+   |
+36 | pub struct RpcContext {
+   |            ---------- fields in this struct
+...
+47 |     pub app: Option<Arc<AppState>>,
+   |         ^^^
+...
+50 |     pub canvas_bus: Option<CanvasEventBus>,
+   |         ^^^^^^^^^^
+   |
+   = note: `RpcContext` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code an
+alysis
+
+warning: variants `AuthRequired`, `WritesDisabled`, and `MethodNotFound` are never constructed
+  --> src\hci\router.rs:82:5
+   |
+78 | pub enum RouterError {
+   |          ----------- variants in this enum
+...
+82 |     AuthRequired,
+   |     ^^^^^^^^^^^^
+83 |     #[error("write tier disabled; set HARNESS_CONTROL_WRITE=1 to enable")]
+84 |     WritesDisabled,
+   |     ^^^^^^^^^^^^^^
+85 |     #[error("method not found: {0}")]
+86 |     MethodNotFound(String),
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `RouterError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code a
+nalysis
+
+warning: method `methods` is never used
+   --> src\hci\router.rs:202:12
+    |
+183 | impl Router {
+    | ----------- method in this implementation
+...
+202 |     pub fn methods(&self) -> impl Iterator<Item = &'static str> + '_ {
+    |            ^^^^^^^
+
+warning: associated function `from_env` is never used
+  --> src\hci\server.rs:34:12
+   |
+32 | impl HciServerConfig {
+   | -------------------- associated function in this implementation
+33 |     /// Default config: loopback only, channel reflects the build profile.
+34 |     pub fn from_env() -> Self {
+   |            ^^^^^^^^
+
+warning: field `auth` is never read
+  --> src\hci\server.rs:54:9
+   |
+51 | pub struct HciServer {
+   |            --------- field in this struct
+...
+54 |     pub auth: Arc<AuthState>,
+   |         ^^^^
+
+warning: `harness` (lib test) generated 24 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.76s
+     Running unittests src\lib.rs (target\debug\deps\harness_lib-75be4189858a99da.exe)
+
+running 26 tests
+test hci::auth::tests::boot_token_consumes_and_issues_session ... ok
+test hci::auth::tests::fresh_tokens_are_distinct ... ok
+test hci::auth::tests::rotate_invalidates_sessions_and_emits_new_boot ... ok
+test hci::auth::tests::wrong_boot_token_rejected ... ok
+test hci::conn_info::tests::build_conn_info_has_fresh_token ... ok
+test hci::conn_info::tests::conn_info_serializes_to_expected_shape ... ok
+test hci::conn_info::tests::two_tokens_are_distinct ... ok
+test hci::conn_info::tests::write_and_remove_roundtrip ... ok
+test hci::methods_system::tests::info_returns_expected_shape ... ok
+test hci::methods_system::tests::ping_returns_pong_and_uptime ... ok
+test hci::methods_workspace::tests::list_caps_depth ... ok
+test hci::methods_workspace::tests::read_small_file ... ok
+test hci::methods_workspace::tests::stat_returns_metadata ... ok
+test hci::router::tests::invalid_session_returns_auth_required ... ok
+test hci::router::tests::notification_returns_none ... ok
+test hci::router::tests::read_method_dispatches ... ok
+test hci::router::tests::unknown_method_returns_32601 ... ok
+test hci::router::tests::write_method_blocked_when_disabled ... ok
+test hci::router::tests::write_method_succeeds_when_enabled ... ok
+test hci::server::tests::auth_round_trip_succeeds ... FAILED
+test hci::server::tests::parse_auth_token_garbage ... ok
+test hci::server::tests::parse_auth_token_happy_path ... ok
+test hci::server::tests::parse_auth_token_missing_params ... ok
+test hci::server::tests::parse_auth_token_wrong_method ... ok

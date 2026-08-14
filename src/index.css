@@ -17,6 +17,13 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --accent-green: #22c55e;
   --accent-red: #ef4444;
+  /* Cartoonish accents — used in small doses (mascot, glows, details)
+     on top of the black/white base. See tailwind.config.js `accent.*`. */
+  --accent-coral: #ff6b5e;
+  --accent-sun: #ffc94d;
+  --accent-mint: #54e3a8;
+  --accent-lilac: #b28dff;
+  --accent-sky: #5bc9ff;
 }
 
 * {
@@ -272,5 +279,568 @@ button.glass-quartz:focus-visible {
 
 .glass-mist:hover { border-color: rgba(255, 255, 255, 0.11); }
 .glass-mist:focus-within { border-color: rgba(255, 255, 255, 0.18); }
+
+/* ── Mention popover — attached above the message box ──────────────
+   Rendered as an absolutely-positioned child of the message box
+   (which is `relative`), pinned to its top edge via `bottom-full`.
+   It shares the box's glass border/radius language but uses a solid
+   near-black fill (`--surface-1`) so content behind it — the model /
+   selector row directly above the box — can't bleed through:
+   the popover squares its bottom corners / drops its bottom border,
+   and while it is open the box's top border + top radius are removed
+   via :has() so there is no visible seam between them.          */
+.mention-popover {
+  border-radius: var(--m-radius) var(--m-radius) 0 0;
+  border-bottom: none;
+  /* Near-opaque surface so the model/selector row above the message
+     box can't bleed through the 2% glass fill and read as overlap. */
+  background: var(--surface-1);
+}
+
+.glass-mist:has(.mention-popover) {
+  border-top-color: transparent;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  /* The box is `isolation: isolate`, which traps the popover's z-index
+     inside it — lift the whole box above the messages/selector row
+     while the popover is open (below global chrome at z-50). */
+  z-index: 40;
+  /* Drop the inset top catch-light so the seam is a clean join. */
+  box-shadow:
+    inset 0 0 1px rgba(255, 255, 255, 0.03),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+@keyframes mentionIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-mention-in { animation: mentionIn 0.16s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-mention-in { animation: none; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   Quartz slider — custom range input matching the glass system.
+   Track: 4px two-tone fill (--slider-fill, set inline from React
+   as a percentage). Thumb: white 16px disc. Focus ring mirrors
+   button.glass-quartz:focus-visible.
+   ════════════════════════════════════════════════════════════ */
+
+input[type="range"].slider-quartz {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 20px; /* comfortable hit area */
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].slider-quartz::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.22) var(--slider-fill, 0%),
+    rgba(255, 255, 255, 0.06) var(--slider-fill, 0%)
+  );
+}
+
+input[type="range"].slider-quartz::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px; /* (track 4px − thumb 16px) / 2 */
+  border-radius: 999px;
+  background: #fff;
+  box-shadow:
+    0 2px 10px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+input[type="range"].slider-quartz:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+input[type="range"].slider-quartz:active::-webkit-slider-thumb {
+  transform: scale(0.95);
+}
+
+input[type="range"].slider-quartz:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+}
+
+/* Firefox parity */
+input[type="range"].slider-quartz::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+input[type="range"].slider-quartz::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+input[type="range"].slider-quartz::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  input[type="range"].slider-quartz::-webkit-slider-thumb {
+    transition: none;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════
+   LLM reply prose (`.prose-harness`)
+   Markdown output rendered by `MessageBody` — the substance of the
+   app, so it gets the full typographic treatment: real heading
+   hierarchy, readable lists, code chips and framed blocks, tables
+   and quotes. All inside the black/white world: color is inherited
+   from the bubble (assistant reads brightest), and only relative
+   dims and hairlines are added here.
+   ════════════════════════════════════════════════════════════ */
+
+.prose-harness {
+  font-size: 1em;              /* 14px chat / 13px canvas threads */
+  line-height: 1.7;
+  color: inherit;
+  overflow-wrap: break-word;
+}
+
+/* Block rhythm — tight groups, more air above a heading than below */
+.prose-harness > * + * { margin-top: 0.75em; }
+.prose-harness > p { margin-top: 0.5em; }
+
+/* Headings — modest steps above body, weight carries the hierarchy */
+.prose-harness h1,
+.prose-harness h2,
+.prose-harness h3,
+.prose-harness h4,
+.prose-harness h5,
+.prose-harness h6 {
+  font-weight: 600;
+  line-height: 1.35;
+}
+.prose-harness h1 { font-size: 1.15em; letter-spacing: -0.01em; margin-top: 1.25em; }
+.prose-harness h2 { font-size: 1.07em; letter-spacing: -0.005em; margin-top: 1.2em; }
+.prose-harness h3,
+.prose-harness h4,
+.prose-harness h5,
+.prose-harness h6 { font-size: 1em; margin-top: 1.1em; }
+.prose-harness h1 + *,
+.prose-harness h2 + *,
+.prose-harness h3 + *,
+.prose-harness h4 + *,
+.prose-harness h5 + *,
+.prose-harness h6 + * { margin-top: 0.5em; }
+
+/* Lists — Preflight strips markers; restore them with tight rhythm */
+.prose-harness ul,
+.prose-harness ol { padding-left: 1.375em; }
+.prose-harness ul { list-style: disc; }
+.prose-harness ul ul { list-style: circle; }
+.prose-harness ol { list-style: decimal; }
+.prose-harness ol ol { list-style: lower-alpha; }
+.prose-harness li { margin-top: 0.25em; }
+.prose-harness li::marker { color: var(--white-50); }
+.prose-harness li > ul,
+.prose-harness li > ol { margin-top: 0.3em; }
+.prose-harness li > p { margin-top: 0.25em; }
+
+/* Inline code — a quiet chip, not a shout */
+.prose-harness code {
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 0.875em;
+  background: var(--white-08);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 0.12em 0.38em;
+}
+
+/* Fenced code — framed panel, wraps instead of scrolling */
+.prose-harness pre {
+  position: relative;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 13px 14px;
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 0.875em;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.prose-harness pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+/* ── Code syntax (highlight.js) — muted editor palette ───────
+   Tokens are the one place hue is allowed: a desaturated, dark-theme
+   family (soft blue / green / orange / cyan / red on gray) so code
+   reads like a real editor without neon. UI chrome stays monochrome. */
+.prose-harness pre code.hljs {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-meta,
+.hljs-doctag {
+  color: #7d8590;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-template-tag,
+.hljs-meta .hljs-keyword {
+  color: #61afef;
+  font-weight: 500;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+  color: #61afef;
+  font-weight: 500;
+}
+.hljs-title.class_,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: #e5c07b;
+  font-weight: 500;
+}
+.hljs-literal,
+.hljs-number,
+.hljs-attr,
+.hljs-attribute {
+  color: #d19a66;
+}
+.hljs-type {
+  color: #56b6c2;
+}
+.hljs-built_in,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property,
+.hljs-name,
+.hljs-tag,
+.hljs-deletion {
+  color: #e06c75;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+  color: #98c379;
+}
+.hljs-params,
+.hljs-operator,
+.hljs-punctuation {
+  color: #abb2bf;
+}
+.hljs-deletion { text-decoration: line-through; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-link { color: #61afef; text-decoration: underline; }
+
+/* Links — the world is monochrome, so affordance is underline +
+   brightness, never blue */
+.prose-harness a {
+  color: var(--white-50);
+  text-decoration: underline;
+  text-decoration-color: var(--white-30);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: color 150ms ease, text-decoration-color 150ms ease;
+}
+.prose-harness a:hover {
+  color: var(--white);
+  text-decoration-color: var(--white-50);
+}
+
+/* Blockquote — a quiet rule, dimmer voice */
+.prose-harness blockquote {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 14px;
+  color: var(--white-50);
+}
+.prose-harness blockquote > * + * { margin-top: 0.5em; }
+
+.prose-harness hr {
+  border: none;
+  border-top: 1px solid var(--border-default);
+  margin: 1.25em 0;
+}
+
+/* Tables — hairline rows, a strong header rule */
+.prose-harness table { width: 100%; border-collapse: collapse; font-size: 0.93em; }
+.prose-harness th,
+.prose-harness td { padding: 6px 10px; text-align: left; vertical-align: top; }
+.prose-harness thead th { font-weight: 600; border-bottom: 1px solid var(--border-strong); }
+.prose-harness tbody td { border-bottom: 1px solid var(--border-subtle); }
+.prose-harness tbody tr:last-child td { border-bottom: none; }
+.prose-harness tbody tr:hover td { background: rgba(255, 255, 255, 0.04); }
+
+.prose-harness strong { font-weight: 600; }
+.prose-harness em { font-style: italic; }
+.prose-harness del { color: var(--white-30); }
+
+/* Images — rounded, framed, open in the lightbox on click */
+.prose-harness img {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+}
+.prose-harness button.lightbox-trigger {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  line-height: 0;
+  cursor: zoom-in;
+}
+.prose-harness button.lightbox-trigger:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+}
+
+/* Mermaid + display math hosts get the same panel language */
+.prose-harness .mermaid-block {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 14px;
+}
+.prose-harness .katex-block {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 2px;
+}
+
+/* ── Code block toolbar (language label + copy) ──────────────
+   Injected by `CodeBlockDecorator`; hidden until hover or focus,
+   always visible on touch devices. */
+.code-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+  user-select: none;
+}
+.prose-harness pre:hover .code-toolbar,
+.prose-harness pre:focus-within .code-toolbar { opacity: 1; }
+@media (hover: none) {
+  .code-toolbar { opacity: 1; }
+}
+.code-toolbar__lang {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--white-30);
+}
+.code-toolbar__lang:empty { display: none; }
+.code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-3);
+  color: var(--white-50);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.code-copy:hover { color: var(--white); border-color: var(--border-strong); }
+.code-copy:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prose-harness a,
+  .code-toolbar,
+  .code-copy { transition: none; }
+}
+
+
+/* ════════════════════════════════════════════════════════════
+   Bip — the harness agent mascot
+   A pill-shaped robot giving the agent a visual presence. The
+   SVG body is static per mood; ALL motion is CSS-driven so it
+   stays cheap and honours prefers-reduced-motion. The mascot is
+   the one sanctioned non-Lucide illustration in the app — it is a
+   character, not an icon.
+   ════════════════════════════════════════════════════════════ */
+
+/* Float — idle (slow, dreamy) vs working (fast, rattled) */
+.mascot-bob        { animation: mascot-bob 3s ease-in-out infinite; }
+.mascot-bob--fast  { animation: mascot-bob-fast 0.9s ease-in-out infinite; }
+.mascot-bounce     { animation: mascot-bounce 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) 2,
+                                  mascot-wiggle 2.4s ease-in-out 1.4s infinite; }
+.mascot-shake      { animation: mascot-shake 0.42s ease-in-out infinite; }
+
+@keyframes mascot-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-2.5px); }
+}
+@keyframes mascot-bob-fast {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25%      { transform: translateY(-1.5px) rotate(-2deg); }
+  75%      { transform: translateY(1px) rotate(2deg); }
+}
+/* Success hop — jump up, squash on landing, then rest */
+@keyframes mascot-bounce {
+  0%   { transform: translateY(0) scale(1, 1); }
+  30%  { transform: translateY(-7px) scale(0.96, 1.04); }
+  55%  { transform: translateY(0) scale(1.07, 0.92); }
+  75%  { transform: translateY(-2px) scale(1, 1); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+/* Success celebration — gentle ongoing wiggle + happy pulse after the
+   one-shot bounce settles. Layered behind the bounce via animation-delay
+   so the mascot keeps moving while it's in `success` mood. */
+@keyframes mascot-wiggle {
+  0%, 100% { transform: rotate(-2.5deg) scale(1, 1); }
+  50%      { transform: rotate(2.5deg) scale(1.05, 0.95); }
+}
+/* Error — small horizontal tremble + faint vertical jitter. Reads as
+   "hmm, something's off" without being noisy or seizure-bad. */
+@keyframes mascot-shake {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  20%      { transform: translate(-0.8px, 0) rotate(-0.8deg); }
+  40%      { transform: translate(0.8px, 0.5px) rotate(0.8deg); }
+  60%      { transform: translate(-0.6px, -0.5px) rotate(-0.6deg); }
+  80%      { transform: translate(0.6px, 0) rotate(0.6deg); }
+}
+
+/* Eyes — slow contented blink for idle/working */
+.mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mascot-blink 3.8s ease-in-out infinite;
+}
+@keyframes mascot-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95%, 97%      { transform: scaleY(0.08); }
+}
+
+/* Antenna tip — soft breathing glow */
+.mascot-glow { animation: mascot-glow 1.8s ease-in-out infinite; }
+@keyframes mascot-glow {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
+/* Ambient halo — soft colored aura behind the mascot; hue per mood
+   is passed from React as `--halo-color` (an rgba string). */
+.mascot-halo {
+  position: absolute;
+  inset: -8px;
+  border-radius: 9999px;
+  background: radial-gradient(circle, var(--halo-color, rgba(255, 255, 255, 0.10)) 0%, transparent 68%);
+  filter: blur(3px);
+  pointer-events: none;
+  animation: mascot-halo 2.8s ease-in-out infinite;
+}
+@keyframes mascot-halo {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 1; transform: scale(1.06); }
+}
+
+/* Working — "data bits" orbiting the head (sky / sun / mint) */
+.mascot-orbit {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mascot-spin 3.4s linear infinite;
+}
+@keyframes mascot-spin { to { transform: rotate(360deg); } }
+
+/* Success — confetti pieces burst from the mascot's center.
+   Direction/size come from per-piece CSS vars set inline. */
+.confetti-piece {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  animation: confetti-burst 1.5s cubic-bezier(0.16, 0.84, 0.44, 1) forwards;
+}
+@keyframes confetti-burst {
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1); opacity: 1; }
+  100% { transform: translate(var(--tx, 10px), var(--ty, -14px)) rotate(var(--rot, 180deg)) scale(0.35); opacity: 0; }
+}
+
+/* Typing buddy — the tiny Bip that "types" text into the stream,
+   or sweeps it up while the agent stream-deletes. */
+.mascot-typing { animation: mascot-typing 0.5s ease-in-out infinite; }
+@keyframes mascot-typing {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-2px); }
+}
+.mascot-sweep { animation: mascot-sway 0.45s ease-in-out infinite; }
+@keyframes mascot-sway {
+  0%, 100% { transform: rotate(-2deg); }
+  50%      { transform: rotate(2deg); }
+}
+.broom-wiggle {
+  transform-box: fill-box;
+  transform-origin: 85% 85%;
+  animation: broom-wiggle 0.4s ease-in-out infinite;
+}
+@keyframes broom-wiggle {
+  0%, 100% { transform: rotate(-10deg); }
+  50%      { transform: rotate(12deg); }
+}
+.sweep-dust { animation: sweep-dust 0.8s ease-out infinite; }
+@keyframes sweep-dust {
+  0%   { transform: translate(0, 0); opacity: 0.9; }
+  100% { transform: translate(var(--dx, -6px), var(--dy, -5px)); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot-bob, .mascot-bob--fast, .mascot-bounce, .mascot-shake,
+  .mascot-eyes, .mascot-glow, .mascot-halo, .mascot-orbit,
+  .confetti-piece, .mascot-typing, .mascot-sweep, .broom-wiggle,
+  .sweep-dust {
+    animation: none;
+  }
+  .confetti-piece { opacity: 0; }
+}
+
+/* ── Composer — soft mint focus ring (the one colored focus in the
+   app; everything else keeps the white focus outline) ─────────── */
+.glass-mist--composer:focus-within {
+  border-color: rgba(84, 227, 168, 0.30);
+}
+.glass-mist--composer:focus-within .glass-quartz {
+  border-color: rgba(84, 227, 168, 0.25);
+}
 
 

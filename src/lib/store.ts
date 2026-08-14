@@ -17,6 +17,10 @@ export interface SessionMessage {
   mentions?: Mention[];
   agentId?: string;
   agentName?: string;
+  /** Chain-of-thought captured for thinking-capable models. The
+   *  frontend renders this in a collapsible "Thinking" block above
+   *  the message body when present. */
+  reasoning?: string;
 }
 
 export interface Session {
@@ -33,6 +37,14 @@ export interface Session {
   activities: import("./ipc").ToolActivity[];
   /** Null until the first assistant response arrives (spec §4.5b). */
   tokenStats?: TokenStats | null;
+  /** Disk-based completion signal written by the agent loop. */
+  lastTurn?: {
+    requestId: string;
+    status: "done" | "error" | "cancelled";
+    at: string;
+    /** Mirrored reasoning from the agent loop. */
+    reasoning?: string;
+  } | null;
 }
 
 /** Per-session token telemetry (spec §4.5). `cumulativeIn` is the PEAK
@@ -69,6 +81,21 @@ const emptyMention: MentionState = {
   selectedIndex: 0,
 };
 
+// ── Tool calls shown in the chat ──
+
+/** One tool call rendered as a block on its assistant message. Live
+ *  events create `running` records; `agent-tool-result` finalizes them.
+ *  On session load the records are rebuilt from persisted activities. */
+export interface ToolCallRecord {
+  /** Backend callId (or the activity id when rebuilt from disk). */
+  id: string;
+  name: string;
+  /** Pretty JSON of the call arguments (undefined when unavailable). */
+  arguments?: string;
+  status: "running" | "ran" | "denied" | "error";
+  summary?: string;
+}
+
 // ── Settings State ──
 
 export interface ModelConfig {
@@ -94,12 +121,26 @@ interface HarnessState {
   updateMessage: (id: string, patch: Partial<SessionMessage>) => void;
   /** Streaming-friendly append: `content += delta` for the message. */
   appendToMessage: (id: string, delta: string) => void;
+  /** Streaming-friendly append for the chain-of-thought buffer. */
+  appendReasoning: (id: string, delta: string) => void;
   removeMessage: (id: string) => void;
 
   // Persisted tool activities of the active session (live feed source)
   activities: import("./ipc").ToolActivity[];
   setActivities: (list: import("./ipc").ToolActivity[]) => void;
   appendActivity: (activity: import("./ipc").ToolActivity) => void;
+
+  // Tool calls rendered inline in the chat, keyed by assistant message
+  // id (`agent-<requestId>`). Kept separate from `messages` so the
+  // persisted session file stays on the spec's activities-only shape.
+  toolCalls: Record<string, ToolCallRecord[]>;
+  setToolCalls: (map: Record<string, ToolCallRecord[]>) => void;
+  appendToolCall: (messageId: string, call: ToolCallRecord) => void;
+  updateToolCall: (
+    messageId: string,
+    callId: string,
+    patch: Partial<ToolCallRecord>
+  ) => void;
 
   // Session metadata (independent of messages — useful for "created at")
   sessionMeta: { createdAt: string; updatedAt: string } | null;
@@ -128,9 +169,11 @@ interface HarnessState {
       summary: string;
     } | null
   ) => void;
-  /** Roster for the Agent Manager window; loaded per project. */
-  agentRoster: import("./ipc").AgentRoster | null;
-  setAgentRoster: (roster: import("./ipc").AgentRoster | null) => void;
+  /** Global agent personality roster; loaded once on app mount. */
+  personalities: import("./ipc").PersonalityRoster | null;
+  setPersonalities: (
+    roster: import("./ipc").PersonalityRoster | null,
+  ) => void;
   agentManagerOpen: boolean;
   setAgentManagerOpen: (open: boolean) => void;
 
@@ -235,12 +278,36 @@ export const useStore = create<HarnessState>((set) => ({
         m.id === id ? { ...m, content: m.content + delta } : m
       ),
     })),
+  appendReasoning: (id, delta) =>
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === id ? { ...m, reasoning: (m.reasoning ?? "") + delta } : m
+      ),
+    })),
   removeMessage: (id) =>
     set((state) => ({ messages: state.messages.filter((m) => m.id !== id) })),
   activities: [],
   setActivities: (list) => set({ activities: list }),
   appendActivity: (activity) =>
     set((state) => ({ activities: [...state.activities, activity] })),
+  toolCalls: {},
+  setToolCalls: (map) => set({ toolCalls: map }),
+  appendToolCall: (messageId, call) =>
+    set((state) => ({
+      toolCalls: {
+        ...state.toolCalls,
+        [messageId]: [...(state.toolCalls[messageId] ?? []), call],
+      },
+    })),
+  updateToolCall: (messageId, callId, patch) =>
+    set((state) => ({
+      toolCalls: {
+        ...state.toolCalls,
+        [messageId]: (state.toolCalls[messageId] ?? []).map((c) =>
+          c.id === callId ? { ...c, ...patch } : c
+        ),
+      },
+    })),
   sessionMeta: null,
   setSessionMeta: (m) => set({ sessionMeta: m }),
   actionMode: "askRisky",
@@ -251,8 +318,8 @@ export const useStore = create<HarnessState>((set) => ({
   setAgentRequestId: (id) => set({ agentRequestId: id }),
   pendingApproval: null,
   setPendingApproval: (p) => set({ pendingApproval: p }),
-  agentRoster: null,
-  setAgentRoster: (roster) => set({ agentRoster: roster }),
+  personalities: null,
+  setPersonalities: (personalities) => set({ personalities }),
   agentManagerOpen: false,
   setAgentManagerOpen: (open) => set({ agentManagerOpen: open }),
 
