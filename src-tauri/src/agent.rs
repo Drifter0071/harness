@@ -88,6 +88,27 @@ impl AgentRole {
             AgentRole::HealthMonitor => "Health Monitor",
         }
     }
+
+    /// Resolve a role from a user-supplied slug (case- and separator-
+    /// insensitive). Accepts "coder", "architect", "researcher",
+    /// "health-monitor" / "health_monitor" / "healthmonitor", and
+    /// "orchestrator". Used by the `delegate_subagent` tool so the
+    /// orchestrator can target a role by name instead of a roster id.
+    pub fn from_slug(slug: &str) -> Option<AgentRole> {
+        let norm = slug
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>();
+        match norm.as_str() {
+            "orchestrator" => Some(AgentRole::Orchestrator),
+            "coder" => Some(AgentRole::Coder),
+            "architect" => Some(AgentRole::Architect),
+            "researcher" => Some(AgentRole::Researcher),
+            "healthmonitor" => Some(AgentRole::HealthMonitor),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -97,6 +118,74 @@ pub enum AgentStatus {
     WaitingForInput,
     Error(String),
     Stopped,
+}
+
+/// Lifecycle status of a dispatched subagent turn. `Error` carries the
+/// failure detail in the record's `error` field (kept separate so the
+/// enum stays `Eq`-friendly on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentStatus {
+    Working,
+    Done,
+    Cancelled,
+    Error,
+}
+
+/// Registry entry for one dispatched subagent turn. Lives in
+/// `AppState.subagents`, keyed by the turn's `sub-<uuid>` request id.
+/// The canvas subscribes to the streamed `agent-*` events for live
+/// content; this record is the introspection surface (`list_subagents`)
+/// and the WebView-reconnect resync source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRecord {
+    pub request_id: String,
+    /// Roster personality id the subagent ran as.
+    pub personality_id: String,
+    /// Human-readable name (personality name, may be user-renamed).
+    pub name: String,
+    pub role: AgentRole,
+    /// The delegation task text the orchestrator handed over.
+    pub task: String,
+    pub status: SubagentStatus,
+    /// requestId of the orchestrator turn that dispatched this subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_request_id: Option<String>,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// Final answer text on success (capped to `CONTENT_MAX`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_content: Option<String>,
+    /// Failure detail on error / cancellation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SubagentRecord {
+    pub fn working(
+        request_id: &str,
+        personality_id: &str,
+        name: &str,
+        role: AgentRole,
+        task: &str,
+        parent_request_id: Option<&str>,
+    ) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            personality_id: personality_id.to_string(),
+            name: name.to_string(),
+            role,
+            task: task.to_string(),
+            status: SubagentStatus::Working,
+            parent_request_id: parent_request_id.map(|s| s.to_string()),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+            final_content: None,
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -112,6 +112,8 @@ pub fn run() {
             commands::run_agent_turn,
             commands::respond_approval,
             commands::cancel_agent,
+            // Subagent dispatch (registry introspection for the canvas)
+            commands::list_subagents,
             // Bip mascot state (bip-mascot-tool spec)
             commands::get_bip_state,
         ])

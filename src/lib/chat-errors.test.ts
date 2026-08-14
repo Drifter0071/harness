@@ -10,10 +10,10 @@ const err = (kind: ChatError["kind"], extra?: Partial<ChatError>): ChatError => 
 });
 
 describe("chatErrorActions", () => {
-  it("cancelled → silent, remove the optimistic message", () => {
+  it("cancelled → silent, keep the partial response in the chat", () => {
     const a = chatErrorActions(err("cancelled"));
     expect(a.toast).toBe("");
-    expect(a.bubble).toBeNull();
+    expect(a.bubble).toBeUndefined();
     expect(a.reenableComposer).toBe(true);
   });
 

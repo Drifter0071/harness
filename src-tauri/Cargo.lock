@@ -4173,7 +4173,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio 1.2.2",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

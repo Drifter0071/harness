@@ -17,6 +17,7 @@ import {
   agentEvents,
   ORCHESTRATOR_AGENT_ID,
   ORCHESTRATOR_AGENT_NAME,
+  SUBAGENT_REQUEST_PREFIX,
 } from "./ipc";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -226,6 +227,9 @@ function applySession(session: Session, projectPath: string): void {
     messages,
     activities: session.activities,
     toolCalls,
+    // Drafts queued in the composer belong to the conversation being
+    // viewed; switching sessions drops them (they are never persisted).
+    pendingMessages: [],
     sessionMeta: { createdAt: session.createdAt, updatedAt: session.updatedAt },
     tokenStats: session.tokenStats ?? null,
     goalMode: session.goalMode,
@@ -482,6 +486,18 @@ function placeholderId(requestId: string): string {
   return `agent-${requestId}`;
 }
 
+/** Subagent turns run under `sub-<uuid>` and stream under the same
+ *  `agent-*` event names. The orchestrator chat owns the
+ *  `agent-<uuid>` namespace; any `sub-` event must NOT reach the
+ *  orchestrator's stream/state — `subagent-manager.ts` is the
+ *  exclusive sink for them. This is a defensive prefix check the
+ *  event handlers apply before touching the orchestrator store. */
+function isOrchestratorRequestId(requestId: string | null | undefined): boolean {
+  return (
+    typeof requestId === "string" && !requestId.startsWith(SUBAGENT_REQUEST_PREFIX)
+  );
+}
+
 function ensurePlaceholder(requestId: string): void {
   const st = useStore.getState();
   const id = placeholderId(requestId);
@@ -506,6 +522,27 @@ function handleAgentTerminal(requestId: string): void {
   scheduleSave();
 }
 
+/** The disk watcher's full reload is unsafe right after a cancelled
+ *  agent turn: the Rust loop's cancel write lands before the frontend's
+ *  debounced save, so the session file can lack the partial response
+ *  the in-memory store still holds (the segment we keep on stop).
+ *  Reloading in that window would wipe the partial from the chat and
+ *  the pending save would then persist the wiped state. Detect the
+ *  mismatch and skip the reload — the debounced save persists the
+ *  partial a moment later. */
+function diskMissingCancelledPartial(
+  session: Session,
+  st: ReturnType<typeof useStore.getState>,
+): boolean {
+  const marker = session.lastTurn;
+  if (!marker || marker.status !== "cancelled") return false;
+  const id = `agent-${marker.requestId}`;
+  const inMemory = st.messages.find((m) => m.id === id);
+  if (!inMemory || (inMemory.content ?? "").length === 0) return false;
+  const onDisk = session.messages.find((m) => m.id === id);
+  return !onDisk || (onDisk.content ?? "").length === 0;
+}
+
 function useAgentEvents(): void {
   useEffect(() => {
     // In browser-only dev there's no Tauri event bus; swallow rejections.
@@ -526,14 +563,18 @@ function useAgentEvents(): void {
           const st = useStore.getState();
           if (!st.workspacePath || !st.activeSessionId) return;
           // If no turn is in flight, a full reload is safe: disk is the
-          // source of truth.
+          // source of truth. Except right after a cancelled agent turn,
+          // where disk may trail the in-memory partial (see
+          // `diskMissingCancelledPartial`).
           if (!st.streamingRequestId && !st.agentRequestId) {
             try {
               const session = await ipc.loadSession(
                 st.workspacePath,
                 st.activeSessionId,
               );
-              if (session) applySession(session, st.workspacePath);
+              if (session && !diskMissingCancelledPartial(session, useStore.getState())) {
+                applySession(session, st.workspacePath);
+              }
             } catch {
               // Best-effort.
             }
@@ -563,6 +604,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onTurnStart((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           ensurePlaceholder(e.requestId);
         })
       )
@@ -571,6 +613,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onChunk((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           ensurePlaceholder(e.requestId);
@@ -582,6 +625,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onReasoning((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           ensurePlaceholder(e.requestId);
@@ -593,6 +637,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onToolStart((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           // Live "running" entry on the assistant message; the persisted
@@ -610,6 +655,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onToolResult((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           // Finalize the inline chat block.
@@ -633,6 +679,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onApprovalRequest((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           st.setPendingApproval({
@@ -648,6 +695,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onApprovalResult((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.pendingApproval?.approvalId === e.approvalId) {
             st.setPendingApproval(null);
@@ -659,6 +707,7 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onDone((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           // The file-watcher fallback (applyTurnCompletionFromDisk)
           // can race with this event and clear `agentRequestId` first
@@ -706,13 +755,19 @@ function useAgentEvents(): void {
     unsubs.push(
       reg(
         agentEvents.onError((e) => {
+          if (!isOrchestratorRequestId(e.requestId)) return;
           const st = useStore.getState();
           if (st.agentRequestId !== e.requestId) return;
           ensurePlaceholder(e.requestId);
           const id = placeholderId(e.requestId);
           if (e.kind === "cancelled") {
-            // User cancelled: drop the half-written placeholder.
-            st.removeMessage(id);
+            // User cancelled: keep whatever already streamed so the
+            // partial response stays in the chat. Only drop the
+            // placeholder when nothing was generated at all.
+            const existing = st.messages.find((m) => m.id === id);
+            if (existing && (existing.content ?? "").length === 0) {
+              st.removeMessage(id);
+            }
             st.setJobActivities([]);
           } else {
             st.updateMessage(id, {
@@ -772,6 +827,7 @@ export function useProjectLifecycle(): void {
           tokenStats: null,
           agentRequestId: null,
           pendingApproval: null,
+          pendingMessages: [],
           activeSessionId: null,
           fileTree: [],
           workspaceStatus: "noProject",

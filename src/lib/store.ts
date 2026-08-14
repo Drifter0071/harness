@@ -8,6 +8,15 @@ export interface Mention {
   lineEnd?: number;
 }
 
+/** A draft queued behind the in-flight generation. Sent automatically
+ *  (FIFO) when the current stream/agent turn ends. Ephemeral — never
+ *  persisted with the session. */
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  mentions?: Mention[];
+}
+
 export interface SessionMessage {
   id: string;
   role: string;
@@ -190,16 +199,110 @@ interface HarnessState {
   /** requestId of the in-flight stream, or null when idle. */
   streamingRequestId: string | null;
   setStreamingRequestId: (id: string | null) => void;
+  /** Drafts queued while a generation is in flight; the first item is
+   *  auto-sent when the current generation ends (FIFO). */
+  pendingMessages: QueuedMessage[];
+  /** Push a draft onto the queue. `atFront` (force-send) puts it ahead
+   *  of everything already queued so it becomes the next generation. */
+  enqueueMessage: (msg: QueuedMessage, atFront?: boolean) => void;
+  removeQueuedMessage: (id: string) => void;
+  updateQueuedMessage: (id: string, patch: Partial<QueuedMessage>) => void;
+  clearPendingMessages: () => void;
   /** When set, opening Settings pre-selects this model in the editor. */
   settingsFocusModelId: string | null;
   setSettingsFocusModelId: (id: string | null) => void;
 
-  // Canvas
-  canvasPanels: import("./store").CanvasPanel[];
-  addCanvasPanel: (panel: import("./store").CanvasPanel) => void;
-  updateCanvasPanel: (id: string, updates: Partial<import("./store").CanvasPanel>) => void;
-  removeCanvasPanel: (id: string) => void;
-  clearCanvas: () => void;
+  // Subagent tiling (tiling spec).
+  //
+  // The orchestrator's chat is conversational; subagent windows are
+  // read-only viewers (live stream, reasoning, tool calls, approval
+  // card, stop button). The user CANNOT message subagents from the
+  // UI — only the Health Agent (via the `subagent_message` tool) can
+  // push messages to a subagent's inbox, and the loop drains that
+  // inbox at the top of every round.
+  //
+  // State shape:
+  //   - `subagents`: live registry mirror (re-synced via
+  //     `list_subagents` on WebView reload, then patched by
+  //     `agent-turn-start` + terminal events). Keyed by
+  //     `sub-<uuid>` request id.
+  //   - `subagentWindows`: per-window stream state (placeholder id,
+  //     content, reasoning, tool calls, approval card, parent
+  //     orchestrator request id). Keyed by request id.
+  //   - `chatRatio`: chat column fraction locked at the FIRST
+  //     subagent spawn — never auto-resizes after. The chat column
+  //     width is fixed from that moment on.
+  //   - `healthInbox`: incoming Health Agent messages per subagent,
+  //     surfaced in the read-only chat as a "Health Monitor" bubble.
+  subagents: import("./ipc").SubagentRecord[];
+  upsertSubagent: (rec: import("./ipc").SubagentRecord) => void;
+  removeSubagent: (requestId: string) => void;
+  setSubagents: (records: import("./ipc").SubagentRecord[]) => void;
+  /** Per-window stream state. `recordId` keys the entry to the
+   *  registry mirror so the renderer can re-key on resync. */
+  subagentWindows: Record<
+    string,
+    {
+      record: import("./ipc").SubagentRecord;
+      /** id of the streaming assistant placeholder (`sub-<requestId>`). */
+      placeholderId: string;
+      content: string;
+      reasoning: string;
+      toolCalls: ToolCallRecord[];
+      /** Pending tool approval surfaced inline in the read-only viewer. */
+      approval:
+        | {
+            approvalId: string;
+            name: string;
+            summary: string;
+          }
+        | null;
+    }
+  >;
+  ensureSubagentWindow: (rec: import("./ipc").SubagentRecord) => void;
+  appendSubagentContent: (requestId: string, delta: string) => void;
+  appendSubagentReasoning: (requestId: string, delta: string) => void;
+  appendSubagentToolCall: (requestId: string, call: ToolCallRecord) => void;
+  updateSubagentToolCall: (
+    requestId: string,
+    callId: string,
+    patch: Partial<ToolCallRecord>,
+  ) => void;
+  setSubagentApproval: (
+    requestId: string,
+    approval:
+      | {
+          approvalId: string;
+          name: string;
+          summary: string;
+        }
+      | null,
+  ) => void;
+  finalizeSubagentWindow: (
+    requestId: string,
+    patch: {
+      status: import("./ipc").SubagentStatus;
+      finalContent?: string;
+      error?: string;
+      content: string;
+      reasoning: string;
+    },
+  ) => void;
+  appendSubagentInbox: (requestId: string, message: string) => void;
+  /** Map of subagent request id → ordered Health Monitor messages
+   *  delivered while the subagent was/is working. Surfaced as
+   *  read-only "Health Monitor" bubbles in the subagent viewer. */
+  healthInbox: Record<string, string[]>;
+  /** Chat column fraction; locked at first subagent spawn and never
+   *  auto-resizes after. `null` until the first subagent opens (no
+   *  tiling yet → the chat owns the full width). */
+  chatRatio: number | null;
+  setChatRatio: (ratio: number) => void;
+  /** Clear the locked chat ratio. Called when the last live
+   *  subagent terminates so the chat reflows back to its original
+   *  full-width / centered state. Safe to call when the ratio is
+   *  already `null` (no-op). */
+  clearChatRatio: () => void;
 
   // Recents
   recentProjects: RecentProject[];
@@ -240,17 +343,6 @@ interface HarnessState {
   /** Measured height of the chat header strip (px); the sidebar anchors below it. */
   chatHeaderHeight: number;
   setChatHeaderHeight: (height: number) => void;
-}
-
-// ── Canvas panel (kept here for circular-import simplicity) ──
-
-export interface CanvasPanel {
-  id: string;
-  agentId: string;
-  agentName: string;
-  role: string;
-  messages: SessionMessage[];
-  status: "working" | "idle" | "error";
 }
 
 // ── Store implementation ──
@@ -334,24 +426,185 @@ export const useStore = create<HarnessState>((set) => ({
   setTokenStats: (s) => set({ tokenStats: s }),
   streamingRequestId: null,
   setStreamingRequestId: (id) => set({ streamingRequestId: id }),
+  pendingMessages: [],
+  enqueueMessage: (msg, atFront = false) =>
+    set((state) => ({
+      pendingMessages: atFront
+        ? [msg, ...state.pendingMessages]
+        : [...state.pendingMessages, msg],
+    })),
+  removeQueuedMessage: (id) =>
+    set((state) => ({
+      pendingMessages: state.pendingMessages.filter((m) => m.id !== id),
+    })),
+  updateQueuedMessage: (id, patch) =>
+    set((state) => ({
+      pendingMessages: state.pendingMessages.map((m) =>
+        m.id === id ? { ...m, ...patch } : m
+      ),
+    })),
+  clearPendingMessages: () => set({ pendingMessages: [] }),
   settingsFocusModelId: null,
   setSettingsFocusModelId: (id) => set({ settingsFocusModelId: id }),
 
-  // Canvas
-  canvasPanels: [],
-  addCanvasPanel: (panel) =>
-    set((state) => ({ canvasPanels: [...state.canvasPanels, panel] })),
-  updateCanvasPanel: (id, updates) =>
+  // Subagent tiling (tiling spec)
+  subagents: [],
+  upsertSubagent: (rec) =>
+    set((state) => {
+      const idx = state.subagents.findIndex((r) => r.requestId === rec.requestId);
+      if (idx === -1) return { subagents: [rec, ...state.subagents] };
+      const next = state.subagents.slice();
+      next[idx] = rec;
+      return { subagents: next };
+    }),
+  removeSubagent: (requestId) =>
+    set((state) => {
+      const { [requestId]: _drop, ...restWindows } = state.subagentWindows;
+      const { [requestId]: _dropInbox, ...restInbox } = state.healthInbox;
+      const nextSubagents = state.subagents.filter(
+        (r) => r.requestId !== requestId,
+      );
+      // When the last subagent is removed (either by user close
+      // after a terminal event, or after a cancellation), drop the
+      // chat-ratio lock so the chat reflows back to its original
+      // full-width / centered position. Mirrors the live-event
+      // `reflowChatIfIdle` in `subagent-manager.ts` for the cases
+      // that don't go through the terminal-event path.
+      const nextRatio =
+        nextSubagents.length === 0 ? null : state.chatRatio;
+      return {
+        subagents: nextSubagents,
+        subagentWindows: restWindows,
+        healthInbox: restInbox,
+        chatRatio: nextRatio,
+      };
+    }),
+  setSubagents: (records) => set({ subagents: records }),
+  subagentWindows: {},
+  ensureSubagentWindow: (rec) =>
+    set((state) => {
+      if (state.subagentWindows[rec.requestId]) {
+        return {
+          subagentWindows: {
+            ...state.subagentWindows,
+            [rec.requestId]: { ...state.subagentWindows[rec.requestId], record: rec },
+          },
+        };
+      }
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [rec.requestId]: {
+            record: rec,
+            placeholderId: `sub-${rec.requestId}`,
+            content: "",
+            reasoning: "",
+            toolCalls: [],
+            approval: null,
+          },
+        },
+      };
+    }),
+  appendSubagentContent: (requestId, delta) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: { ...w, content: w.content + delta },
+        },
+      };
+    }),
+  appendSubagentReasoning: (requestId, delta) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: { ...w, reasoning: w.reasoning + delta },
+        },
+      };
+    }),
+  appendSubagentToolCall: (requestId, call) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: { ...w, toolCalls: [...w.toolCalls, call] },
+        },
+      };
+    }),
+  updateSubagentToolCall: (requestId, callId, patch) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: {
+            ...w,
+            toolCalls: w.toolCalls.map((c) =>
+              c.id === callId ? { ...c, ...patch } : c,
+            ),
+          },
+        },
+      };
+    }),
+  setSubagentApproval: (requestId, approval) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      return {
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: { ...w, approval },
+        },
+      };
+    }),
+  finalizeSubagentWindow: (requestId, patch) =>
+    set((state) => {
+      const w = state.subagentWindows[requestId];
+      if (!w) return {};
+      const finishedAt = new Date().toISOString();
+      const record: import("./ipc").SubagentRecord = {
+        ...w.record,
+        status: patch.status,
+        finalContent: patch.finalContent,
+        error: patch.error,
+        finishedAt,
+      };
+      return {
+        subagents: state.subagents.map((r) =>
+          r.requestId === requestId ? record : r,
+        ),
+        subagentWindows: {
+          ...state.subagentWindows,
+          [requestId]: {
+            ...w,
+            record,
+            content: patch.content,
+            reasoning: patch.reasoning,
+            approval: null,
+          },
+        },
+      };
+    }),
+  appendSubagentInbox: (requestId, message) =>
     set((state) => ({
-      canvasPanels: state.canvasPanels.map((p) =>
-        p.id === id ? { ...p, ...updates } : p
-      ),
+      healthInbox: {
+        ...state.healthInbox,
+        [requestId]: [...(state.healthInbox[requestId] ?? []), message],
+      },
     })),
-  removeCanvasPanel: (id) =>
-    set((state) => ({
-      canvasPanels: state.canvasPanels.filter((p) => p.id !== id),
-    })),
-  clearCanvas: () => set({ canvasPanels: [] }),
+  healthInbox: {},
+  chatRatio: null,
+  setChatRatio: (ratio) => set({ chatRatio: ratio }),
+  clearChatRatio: () =>
+    set((state) => (state.chatRatio === null ? state : { chatRatio: null })),
 
   // Recents
   recentProjects: [],

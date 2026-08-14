@@ -11,6 +11,7 @@
 //! only tool whose access is gated by `caller_role`: only the Health Agent
 //! (`AgentRole::HealthMonitor`) may call it. See `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -19,10 +20,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::{oneshot, watch, Mutex as TokioMutex};
+use uuid::Uuid;
 
-use crate::agent::AgentRole;
-use crate::agent_loop::AgentEventSink;
+use crate::agent::{AgentRole, SubagentRecord};
+use crate::agent_loop::{
+    run_subagent_turn, AgentEventSink, ResolvedAgent, TurnCompleter, TurnFinish,
+};
 use crate::llm_client::ToolSpec;
+use crate::models::ReasoningEffort;
+use crate::personalities::{builtin_personality_id, get_personality};
+use crate::session::ActionMode;
 
 /// Output cap for tool `content` (model context budget).
 const CONTENT_MAX: usize = 32 * 1024;
@@ -31,6 +39,13 @@ const STREAM_MAX: usize = 16 * 1024;
 /// Hard timeout for `run_command` (the child is killed on expiry).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const SEARCH_MAX_DEPTH: usize = 8;
+
+/// Prefix for dispatched-subagent request ids (`sub-<uuid>`). The
+/// frontend routes `agent-*` events whose `requestId` starts with this
+/// to the subagent window manager instead of the chat. Kept here (next
+/// to the dispatch machinery) so `agent_loop` and `commands` share one
+/// constant.
+pub const SUBAGENT_REQUEST_PREFIX: &str = "sub-";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +135,41 @@ fn now_iso8601() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
 }
 
+/// Everything the `delegate_subagent` / `subagent_message` tools need to
+/// spawn and track a subagent turn from inside the agent loop. Built once
+/// per chat turn in `commands::run_agent_turn` and threaded through the
+/// `ToolContext`; `Clone` is cheap (every field is `Arc` or a `Copy`).
+#[derive(Clone)]
+pub struct SubagentDispatchContext {
+    /// Registry of dispatched subagent turns keyed by their `sub-<uuid>`
+    /// request id. Written by `delegate_subagent`, read by
+    /// `list_subagents` and the WebView-reconnect resync.
+    pub subagents: Arc<DashMap<String, SubagentRecord>>,
+    /// Per-subagent message inbox keyed by request id. The Health Agent
+    /// pushes `subagent_message` tool calls here; the subagent's loop
+    /// drains it at the top of every LLM round.
+    pub inbox: Arc<DashMap<String, TokioMutex<Vec<String>>>>,
+    /// Completer used to run the subagent turn (same provider plumbing
+    /// as the orchestrator turn).
+    pub completer: Arc<dyn TurnCompleter>,
+    pub pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
+    pub in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
+    /// Event sink for the subagent turn's streamed `agent-*` events.
+    pub sink: Arc<dyn AgentEventSink>,
+    /// The workspace the subagent operates in (same as the orchestrator).
+    pub workspace: String,
+    /// Approval policy the subagent turn runs under.
+    pub action_mode: ActionMode,
+    /// Reasoning effort forwarded to the subagent's provider call.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Fallback model id: used when the personality has no bound saved
+    /// model (the orchestrator's chat model).
+    pub chat_model_id: String,
+    /// requestId of the orchestrator turn that owns this context. Used as
+    /// the `parent_request_id` on every dispatched subagent record.
+    pub request_id: String,
+}
+
 /// Inputs the agent loop passes to every tool call. Centralising these here
 /// means the `bip` role-gate, the `run_command` policy gate, and the event
 /// emission can all hang off the same place.
@@ -134,6 +184,11 @@ pub struct ToolContext {
     pub caller_role: AgentRole,
     /// Where tool-emitted events (e.g. `bip-state`) are broadcast.
     pub sink: Arc<dyn AgentEventSink>,
+    /// Present only on orchestrator turns: gives the dispatch tools
+    /// access to the subagent registry, inboxes, and the machinery to
+    /// run subagent turns. `None` on subagent turns (they can't spawn
+    /// further subagents) and in unit tests that don't care.
+    pub subagent: Option<SubagentDispatchContext>,
 }
 
 impl ToolContext {
@@ -150,7 +205,15 @@ impl ToolContext {
             auto_allowed: true,
             caller_role,
             sink,
+            subagent: None,
         }
+    }
+
+    /// Attach the subagent dispatch machinery (registry, inboxes, turn
+    /// runner). The agent loop calls this for orchestrator turns.
+    pub fn with_subagent(mut self, subagent: SubagentDispatchContext) -> Self {
+        self.subagent = Some(subagent);
+        self
     }
 }
 
@@ -264,7 +327,65 @@ impl ToolSpec {
                     "required": ["mood"]
                 }),
             },
+            ToolSpec {
+                name: "delegate_subagent".into(),
+                description: "Dispatch a task to a subagent and wait for its final answer. \
+                              Only callable by the Orchestrator (the chat agent). The subagent \
+                              runs in its own window with its own streaming progress. Pass the \
+                              roster personality id (e.g. \"builtin-coder\") or a role name \
+                              (\"coder\", \"architect\", \"researcher\", \"health-monitor\") as \
+                              `personality`, and the full task as `task`."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "personality": {
+                            "type": "string",
+                            "description": "Roster personality id or role slug to run as"
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "The full task for the subagent"
+                        }
+                    },
+                    "required": ["personality", "task"]
+                }),
+            },
+            ToolSpec {
+                name: "subagent_message".into(),
+                description: "Send a message to a running subagent (by its request id, e.g. \
+                              \"sub-…\"). Only callable by the Health Agent. The message is \
+                              delivered as a user message into the subagent's next LLM round. \
+                              Get subagent request ids from `list_subagents`."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "description": "The sub-<uuid> request id of the target subagent"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The message to deliver"
+                        }
+                    },
+                    "required": ["request_id", "message"]
+                }),
+            },
         ]
+    }
+
+    /// The toolset a dispatched subagent runs with: the full set minus
+    /// `delegate_subagent` (only the Orchestrator may spawn — prevents
+    /// unbounded recursion) and minus the Health-only meta-tools' specs
+    /// that make no sense as dispatch targets. Role gates in the
+    /// executors remain the hard backstop.
+    pub fn subagent() -> Vec<ToolSpec> {
+        Self::all()
+            .into_iter()
+            .filter(|t| t.name != "delegate_subagent")
+            .collect()
     }
 }
 
@@ -292,6 +413,8 @@ pub async fn execute_tool(
         }
         "web_search" => tool_web_search(args).await,
         "bip" => tool_bip(ctx, args).await,
+        "delegate_subagent" => tool_delegate_subagent(ctx, args).await,
+        "subagent_message" => tool_subagent_message(ctx, args).await,
         other => Err(format!("Unknown tool: {}", other)),
     }
 }
@@ -626,6 +749,206 @@ async fn tool_bip(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String>
     })
 }
 
+// -- Subagent dispatch (delegate_subagent / subagent_message) --
+
+/// `delegate_subagent` — spawn a subagent turn and wait for its final
+/// answer. Hard-gated to the Orchestrator: subagents get the reduced
+/// `ToolSpec::subagent()` (no `delegate_subagent`) AND this role check,
+/// so recursion is impossible through either path.
+///
+/// The turn runs on a scratch session, streams the standard `agent-*`
+/// events under its `sub-<uuid>` request id (the frontend opens a
+/// tiled window for it), and the final content is handed back to the
+/// orchestrator as this tool's result.
+async fn tool_delegate_subagent(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    if ctx.caller_role != AgentRole::Orchestrator {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "delegate_subagent is restricted to the Orchestrator; {:?} is not allowed",
+                ctx.caller_role
+            ),
+            content: None,
+        });
+    }
+    let Some(dispatch) = &ctx.subagent else {
+        return Err("delegate_subagent: no subagent dispatch context on this turn".into());
+    };
+
+    let target = string_arg(args, "personality")?;
+    let task = string_arg(args, "task")?;
+
+    // Resolve the personality: roster id first ("builtin-coder", a user
+    // row), then a role slug ("coder", "health-monitor", …).
+    let personality = match get_personality(&target).await? {
+        Some(p) => p,
+        None => match AgentRole::from_slug(&target) {
+            Some(role) if role.is_subagent() => get_personality(&builtin_personality_id(role))
+                .await?
+                .ok_or_else(|| format!("delegate_subagent: no roster row for role {:?}", role))?,
+            _ => {
+                return Ok(ToolResult {
+                    ok: false,
+                    summary: format!(
+                        "delegate_subagent: {:?} is not a roster personality id or subagent role",
+                        target
+                    ),
+                    content: None,
+                });
+            }
+        },
+    };
+    // The Orchestrator is not a dispatch target: no roster row exists
+    // for it, but guard anyway (a user could theoretically craft a
+    // personality with the Orchestrator role — refuse to recurse).
+    if !personality.role.is_subagent() {
+        return Ok(ToolResult {
+            ok: false,
+            summary: "delegate_subagent: cannot dispatch to the Orchestrator".into(),
+            content: None,
+        });
+    }
+
+    // Personality-bound saved model when it exists, else the orchestrator's
+    // chat model.
+    let model_id =
+        crate::models::resolve_personality_model(&personality, &dispatch.chat_model_id).await;
+    let resolved = ResolvedAgent::from_personality(&personality, &model_id);
+
+    let request_id = format!("{SUBAGENT_REQUEST_PREFIX}{}", Uuid::new_v4());
+    dispatch.subagents.insert(
+        request_id.clone(),
+        SubagentRecord::working(
+            &request_id,
+            &personality.id,
+            &personality.name,
+            personality.role,
+            &task,
+            Some(&dispatch.request_id),
+        ),
+    );
+    dispatch
+        .inbox
+        .insert(request_id.clone(), TokioMutex::new(Vec::new()));
+
+    let handle = run_subagent_turn(
+        request_id.clone(),
+        resolved,
+        task.clone(),
+        dispatch.action_mode.clone(),
+        dispatch.workspace.clone(),
+        dispatch.sink.clone(),
+        dispatch.pending_approvals.clone(),
+        dispatch.in_flight.clone(),
+        dispatch.completer.clone(),
+        dispatch.reasoning_effort,
+        Some(dispatch.clone()),
+    );
+    let finish = handle
+        .await
+        .map_err(|e| format!("delegate_subagent: subagent task panicked/aborted: {}", e))?;
+
+    let _ = dispatch.inbox.remove(&request_id);
+    match finish {
+        TurnFinish::Done {
+            content, reasoning, ..
+        } => {
+            let final_content = truncate(&content, CONTENT_MAX);
+            if let Some(mut rec) = dispatch.subagents.get_mut(&request_id) {
+                rec.status = crate::agent::SubagentStatus::Done;
+                rec.finished_at = Some(now_iso8601());
+                rec.final_content = Some(final_content.clone());
+            }
+            let mut summary = format!(
+                "subagent {} ({}) finished with {} chars",
+                request_id,
+                personality.name,
+                final_content.chars().count()
+            );
+            if !reasoning.is_empty() {
+                summary.push_str(&format!(
+                    " ({} chars of reasoning)",
+                    reasoning.chars().count()
+                ));
+            }
+            Ok(ToolResult {
+                ok: true,
+                summary,
+                content: Some(final_content),
+            })
+        }
+        TurnFinish::Error { kind, message } => {
+            if let Some(mut rec) = dispatch.subagents.get_mut(&request_id) {
+                rec.status = crate::agent::SubagentStatus::Error;
+                rec.finished_at = Some(now_iso8601());
+                rec.error = Some(message.clone());
+            }
+            Ok(ToolResult {
+                ok: false,
+                summary: format!(
+                    "subagent {} ({}) failed: {}: {}",
+                    request_id, personality.name, kind, message
+                ),
+                content: None,
+            })
+        }
+    }
+}
+
+/// `subagent_message` — deliver a message to a running subagent. The
+/// message lands in the subagent's inbox and is fed into its next LLM
+/// round as a `[Health Monitor]` user message. Hard-gated to the Health
+/// Agent (`AgentRole::HealthMonitor`), mirroring the `bip` tool's gate.
+async fn tool_subagent_message(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String> {
+    if ctx.caller_role != AgentRole::HealthMonitor {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "subagent_message is restricted to the Health Agent; {:?} is not allowed",
+                ctx.caller_role
+            ),
+            content: None,
+        });
+    }
+    let Some(dispatch) = &ctx.subagent else {
+        return Err("subagent_message: no subagent dispatch context on this turn".into());
+    };
+
+    let request_id = string_arg(args, "request_id")?;
+    let message = string_arg(args, "message")?;
+    if message.trim().is_empty() {
+        return Ok(ToolResult {
+            ok: false,
+            summary: "subagent_message: `message` must not be empty".into(),
+            content: None,
+        });
+    }
+    let Some(entry) = dispatch.inbox.get(&request_id) else {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "subagent_message: no active subagent with request id {}",
+                request_id
+            ),
+            content: None,
+        });
+    };
+    entry.value().lock().await.push(message.clone());
+
+    // Broadcast so the subagent window can display the incoming message
+    // without polling. Routed by requestId like the other agent events.
+    ctx.sink.emit(
+        "subagent-message",
+        json!({ "requestId": request_id, "message": message }),
+    );
+
+    Ok(ToolResult {
+        ok: true,
+        summary: format!("subagent_message: delivered to {}", request_id),
+        content: None,
+    })
+}
+
 // -- Workspace guard --
 
 /// Resolve `target` (absolute or workspace-relative) to a path that is
@@ -800,6 +1123,7 @@ mod tests {
     use super::*;
     use crate::agent::AgentRole;
     use crate::agent_loop::AgentEventSink;
+    use crate::llm_client::{AgentTurnError, ChatUsage, ToolChatRequest, TurnOutcome};
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -830,6 +1154,7 @@ mod tests {
             auto_allowed: true,
             caller_role,
             sink: sink.clone() as std::sync::Arc<dyn AgentEventSink>,
+            subagent: None,
         };
         (ctx, sink)
     }
@@ -1216,5 +1541,269 @@ mod tests {
             "thought should be truncated, got {} chars",
             payload_thought.chars().count()
         );
+    }
+
+    // -- delegate_subagent / subagent_message --
+
+    /// Redirect the global personalities file into a tempdir for the
+    /// duration of a test (resolution reads the roster from disk).
+    struct DataDirGuard {
+        prev: Option<std::path::PathBuf>,
+        _tmp: TempDir,
+    }
+    impl DataDirGuard {
+        fn new() -> Self {
+            let tmp = TempDir::new().unwrap();
+            let prev = dirs::data_dir();
+            // SAFETY: tests are single-threaded for this guard's lifetime.
+            unsafe {
+                std::env::set_var("HARNESS_DATA_DIR_OVERRIDE", tmp.path());
+            }
+            Self { prev, _tmp: tmp }
+        }
+    }
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("HARNESS_DATA_DIR_OVERRIDE");
+            }
+            let _ = self.prev.as_ref();
+        }
+    }
+
+    /// Minimal `TurnCompleter` that replays a scripted sequence of
+    /// outcomes, mirroring the mock in `agent_loop` tests.
+    struct MockCompleter {
+        script: Mutex<std::collections::VecDeque<Result<TurnOutcome, AgentTurnError>>>,
+    }
+    impl MockCompleter {
+        fn new(script: Vec<Result<TurnOutcome, AgentTurnError>>) -> Self {
+            Self {
+                script: Mutex::new(script.into()),
+            }
+        }
+    }
+    impl crate::agent_loop::TurnCompleter for MockCompleter {
+        fn complete(
+            &self,
+            _request: ToolChatRequest,
+            _tools: Vec<ToolSpec>,
+            _text_cb: Box<dyn Fn(&str) + Send>,
+            _reasoning_cb: Box<dyn Fn(&str) + Send>,
+            _cancel_rx: oneshot::Receiver<()>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>,
+        > {
+            let next = self.script.lock().unwrap().pop_front();
+            Box::pin(async move {
+                next.unwrap_or_else(|| {
+                    Ok(TurnOutcome {
+                        text: String::new(),
+                        reasoning: String::new(),
+                        tool_calls: Vec::new(),
+                        usage: ChatUsage {
+                            input: 0,
+                            output: 0,
+                        },
+                    })
+                })
+            })
+        }
+    }
+
+    fn text_outcome(text: &str) -> Result<TurnOutcome, AgentTurnError> {
+        Ok(TurnOutcome {
+            text: text.into(),
+            reasoning: String::new(),
+            tool_calls: Vec::new(),
+            usage: ChatUsage {
+                input: 1,
+                output: 1,
+            },
+        })
+    }
+
+    /// Orchestrator context carrying a `SubagentDispatchContext` whose
+    /// subagent turns run against the given mock completer.
+    fn orchestrator_dispatch_ctx(
+        workspace: &str,
+        sink: &std::sync::Arc<TestSink>,
+        completer: std::sync::Arc<MockCompleter>,
+    ) -> (ToolContext, SubagentDispatchContext) {
+        let dispatch = SubagentDispatchContext {
+            subagents: Arc::new(DashMap::new()),
+            inbox: Arc::new(DashMap::new()),
+            completer,
+            pending_approvals: Arc::new(DashMap::new()),
+            in_flight: Arc::new(DashMap::new()),
+            sink: sink.clone(),
+            workspace: workspace.to_string(),
+            action_mode: ActionMode::Auto,
+            reasoning_effort: None,
+            chat_model_id: "test-model".into(),
+            request_id: "parent-1".into(),
+        };
+        let ctx = ToolContext {
+            workspace: workspace.to_string(),
+            auto_allowed: true,
+            caller_role: AgentRole::Orchestrator,
+            sink: sink.clone() as Arc<dyn AgentEventSink>,
+            subagent: Some(dispatch.clone()),
+        };
+        (ctx, dispatch)
+    }
+
+    #[tokio::test]
+    async fn delegate_subagent_refuses_non_orchestrator() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, _) = ctx_for(&w, AgentRole::Coder);
+        let res = execute_tool(
+            &ctx,
+            "delegate_subagent",
+            &json!({"personality": "coder", "task": "x"}),
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("Orchestrator"));
+    }
+
+    #[tokio::test]
+    async fn delegate_subagent_rejects_unknown_target() {
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, _) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+        let res = execute_tool(
+            &ctx,
+            "delegate_subagent",
+            &json!({"personality": "nope", "task": "x"}),
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("not a roster personality"));
+    }
+
+    #[tokio::test]
+    async fn delegate_subagent_runs_and_updates_registry() {
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let completer = Arc::new(MockCompleter::new(vec![text_outcome("final answer here")]));
+        let (ctx, dispatch) = orchestrator_dispatch_ctx(&w, &sink, completer);
+
+        let res = execute_tool(
+            &ctx,
+            "delegate_subagent",
+            &json!({"personality": "coder", "task": "fix the bug"}),
+        )
+        .await
+        .unwrap();
+        assert!(res.ok, "summary: {}", res.summary);
+        assert!(res.summary.contains("finished"));
+        assert!(res
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("final answer here"));
+
+        // Registry: exactly one Done record, role Coder, sub- prefixed,
+        // parented to the orchestrator turn.
+        assert_eq!(dispatch.subagents.len(), 1);
+        let rec = dispatch.subagents.iter().next().unwrap().value().clone();
+        assert_eq!(rec.status, crate::agent::SubagentStatus::Done);
+        assert_eq!(rec.role, AgentRole::Coder);
+        assert!(rec.request_id.starts_with("sub-"));
+        assert_eq!(rec.parent_request_id.as_deref(), Some("parent-1"));
+        assert_eq!(rec.final_content.as_deref(), Some("final answer here"));
+        assert!(rec.finished_at.is_some());
+
+        // The canvas-opening turn-start event streamed under the sub-
+        // request id, and the terminal event fired.
+        let events = sink.events.lock().unwrap().clone();
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|(n, _)| n == "agent-turn-start")
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].1["requestId"].as_str().unwrap(), rec.request_id);
+        assert_eq!(starts[0].1["subagent"]["name"], "Coder");
+        assert_eq!(starts[0].1["subagent"]["role"], "Coder");
+        assert_eq!(starts[0].1["subagent"]["task"], "fix the bug");
+        assert_eq!(events.iter().filter(|(n, _)| n == "agent-done").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn subagent_message_refuses_non_health_caller() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (mut ctx, _) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+        ctx.caller_role = AgentRole::Coder;
+        let res = execute_tool(
+            &ctx,
+            "subagent_message",
+            &json!({"request_id": "sub-1", "message": "hi"}),
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("Health Agent"));
+        assert!(sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subagent_message_queues_and_emits_for_health_caller() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, dispatch) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+        dispatch
+            .inbox
+            .insert("sub-1".into(), TokioMutex::new(Vec::new()));
+
+        let res = execute_tool(
+            &ctx,
+            "subagent_message",
+            &json!({"request_id": "sub-1", "message": "watch out"}),
+        )
+        .await
+        .unwrap();
+        assert!(res.ok, "summary: {}", res.summary);
+
+        // The message landed in the inbox and the event was broadcast.
+        let inbox = dispatch.inbox.get("sub-1").unwrap();
+        assert_eq!(inbox.value().lock().await.as_slice(), &["watch out"]);
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "subagent-message");
+        assert_eq!(events[0].1["requestId"], "sub-1");
+        assert_eq!(events[0].1["message"], "watch out");
+    }
+
+    #[tokio::test]
+    async fn subagent_message_unknown_target_fails() {
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, _) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+        let res = execute_tool(
+            &ctx,
+            "subagent_message",
+            &json!({"request_id": "sub-9", "message": "hi"}),
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("no active subagent"));
+        assert!(sink.events.lock().unwrap().is_empty());
     }
 }

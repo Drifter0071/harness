@@ -6,11 +6,12 @@
 > This spec is generated from the code, not the other way around. When the
 > code and this doc disagree, **the code wins** — fix this doc.
 >
-> Last reconciled: 2026-08-13 against `src/index.css`, `tailwind.config.js`,
+> Last reconciled: 2026-08-14 against `src/index.css`, `tailwind.config.js`,
 > and the component tree under `src/components/` — chat message hierarchy
-> (assistant = brightest), topbar show-sidebar button, Agent Manager slider,
-> canvas send/focus/empty states, session header buttons, file-type icons,
-> ChatHeader telemetry.
+> (assistant = brightest), custom title bar (4 app buttons + 3 window
+> controls in one row), Bip capsule + thought popover, Agent Manager slider,
+> subagent tiling (read-only viewers, equal-grid layout, locked chat column),
+> session header buttons, file-type icons, ChatHeader telemetry.
 
 ## Philosophy
 
@@ -110,8 +111,8 @@ it to the scale.**
 | `text-[28px]` | Hero wordmark ("harness") in empty states — `font-light tracking-tight` |
 | `text-[16px]` | Modal titles ("Model Setup") |
 | `text-[14px]` | Primary body copy in chat messages |
-| `text-[13px]` | Settings labels, body copy in canvas sub-tiles, dialog copy |
-| `text-[12px]` | Sub-canvas agent name, button labels, modal labels |
+| `text-[13px]` | Settings labels, body copy in subagent viewer bodies, dialog copy |
+| `text-[12px]` | Subagent window name, button labels, modal labels |
 | `text-[11px]` | Section labels (uppercase), recent-project row, agent body in main chat |
 | `text-[10px]` | Active-root pill, helper copy in tight rows |
 | `text-[9px]`  | Section headings ("RECENT", "FILES") — uppercase, tracking `[0.14em]` |
@@ -214,7 +215,7 @@ feel like glass without being a button.
 
 - **Primary action / button →** `glass-quartz` (one of the three variants)
 - **Container / panel that holds content →** `glass-mist`
-- **Card with a header and body, no glass →** plain `bg-surface-1` with `border-border-subtle` (this is what the DynamicCanvas sub-tiles do)
+- **Card with a header and body, no glass →** plain `bg-surface-1` with `border-border-subtle` (this is what the SubagentWindow tiles do)
 - **Never:** nested glass inside glass. One layer of the material per surface.
 
 ## Spacing
@@ -232,11 +233,13 @@ still applies. Practical notes from the code:
 - `py-1.5` (6px) — list-row vertical padding (default)
 - `py-3` (12px) — section break inside a sidebar pane
 
-The ActiveJobBar sits at `top-[52px]` (36px custom title bar + 16px gap)
-with `left-1/2 -translate-x-1/2` and a 34×34 hit target for each button.
-That's the load-bearing floating position in the app. The offset is paired
-with `TITLEBAR_HEIGHT` in `TitleBar.tsx` — if the title bar height changes,
-update this to match.
+The Bip capsule (the `ActiveJobBar` component) floats at `top-[52px]`
+(36px custom title bar + 16px gap) with `left-1/2 -translate-x-1/2`.
+It anchors the agent mascot and is the only floating control on the
+top of the app — the four app-bar actions (Show sidebar / Open folder
+/ Settings / Agent Manager) live in the title bar instead, so the bar
+reads as a single row. The offset is paired with `TITLEBAR_HEIGHT` in
+`TitleBar.tsx` — if the title bar height changes, update this to match.
 
 ## Component patterns
 
@@ -246,14 +249,14 @@ update this to match.
   `px-4 py-2.5`. Body is `text-white-50` — the prompt is the input, not
   the substance.
 - **Assistant:** left-aligned, no bubble. Body is `text-white` — the
-  output is the substance and reads brightest, matching the canvas
-  sub-tile hierarchy. Above the body, a label row with a
+  output is the substance and reads brightest, matching the subagent
+  tile hierarchy. Above the body, a label row with a
   `bg-status-active` 1.5×1.5 dot, the agent name in `text-white-30` at
   `text-[11px] font-medium`, and a 1.5px gap.
 - **Reply prose** (`MessageBody` → `.prose-harness`, typography in
   `src/index.css`): markdown renders with real hierarchy inside the
   black/white world. Body inherits the bubble's color and size (14px
-  chat / 13px canvas threads), line-height 1.7, `overflow-wrap: break-word`.
+  chat / 13px subagent threads), line-height 1.7, `overflow-wrap: break-word`.
   Headings are 600-weight steps (1.15 / 1.07 / 1em) with more air above
   than below. Lists restore disc/decimal markers (Preflight strips
   them), marker color `white-50`. Inline code is a `white-08` chip with
@@ -279,56 +282,105 @@ update this to match.
   `px-3 py-1`, `rounded-full`, `border-border-subtle`.
 - **Animation:** every message is `animate-fade-in` (150ms `ease-out`).
 
-### Active job bar (`ActiveJobBar.tsx`)
-
-A single fixed pill at top-center, `glass-mist glass-mist--pill`, holding:
-
-1. **Show sidebar** — rendered only while `!sidebarOpen`. 34×34
-   `glass-quartz glass-quartz--pill` button (`PanelLeftOpen`), sitting
-   flush with no divider to its right — it groups with Open folder as a
-   pair of actions, so dividers only separate action groups.
-2. **Open folder** — 34×34 `glass-quartz glass-quartz--pill` button (`FolderPlus`).
-3. A 1px vertical divider (`w-px h-4 bg-border-subtle`).
-4. **Status indicator** — when idle: a `Circle` (6px) at `fill-white-15` plus
-   "Idle" in `text-[11px] text-white-15`. When active: a tinted pill at
-   `bg-accent-green/10 border border-accent-green/20` with a `Circle` (6px)
-   at `fill-accent-green` and `animate-pulse`, plus the first activity label
-   truncated to 160px.
-5. A 1px vertical divider.
-6. **Settings** — 34×34 `glass-quartz glass-quartz--pill` button (`Settings`).
-
-Hovering the status pill reveals a `glass-mist` popover (`min-w-[280px]`,
-`p-3`, `animate-fade-in`) with the full activity list and active agents.
-The popover uses `top-full left-1/2 -translate-x-1/2 mt-2`.
-
-The sidebar's open affordance lives in the ActiveJobBar (Show sidebar
-button); there is no floating toggle anymore.
-
 ### Title bar (`TitleBar.tsx`)
 
 The window is undecorated (`decorations: false` in `tauri.conf.json`,
 plus `shadow: false` so Windows 11 doesn't force a 1px white border or
-rounded corners onto the black canvas). `TitleBar.tsx` replaces the
-native chrome with a pure-black 36px strip:
+rounded corners onto the black canvas, `acceptFirstMouse: true` so the
+first drag on a not-yet-focused window moves it, and `backgroundColor:
+"#000000"` so there's no white flash on launch). `TitleBar.tsx`
+replaces the native chrome with a single 36px strip that hosts **the
+four app actions on the left, the Bip mascot in the center, and the
+three window controls on the right** so the top of the app reads as
+one row.
 
 - **Layout:** `bg-surface-0`, 36px tall, hairline `border-border-subtle`
   bottom edge, `select-none`. Sits above every overlay (`z-[60]`, above
   the Settings / Agent Manager `z-50`) so the window can always be
   dragged, minimized, maximized or closed — like native chrome.
-- **Wordmark:** left side, "HARNESS" with the panel-label recipe
-  (`text-[9px] uppercase tracking-[0.14em] font-medium text-white-15`).
-- **Window controls:** right side, three full-height buttons with 46px
-  hit targets (the Windows convention): Minimize (`Minus`), Maximize /
-  Restore (`Square` / `Copy`, swapped via the resize listener), Close
-  (`X`). At rest `text-white-50`; hover lifts to white on `white-08`;
-  Close hovers to `status-error`. Buttons `stopPropagation` the mousedown
-  so they stay out of the drag region.
-- **Dragging:** the strip and its wordmark carry `data-tauri-drag-region`
-  — drag moves the window, double-click maximizes (native HTCAPTION),
-  and edge resizing still works (tao's borderless resize handles).
-- **Maximized state:** tracked via `isMaximized()` + `onResized` from
-  `@tauri-apps/api/window`. In plain-browser dev the controls render
-  but no-op.
+- **Drag region:** the strip carries `data-tauri-drag-region="deep"`
+  (Tauri ≥ 2.11). Clicks on any non-button, non-Bip pixel — wordmark,
+  dividers, empty space — start a native window drag. Buttons and the
+  Bip element carry `data-tauri-drag-region="false"` to opt out so
+  their clicks / hovers fire. Double-click on the strip maximizes
+  (native HTCAPTION). Edge resizing still works (tao's borderless
+  resize handles).
+- **Left cluster (app actions):** "HARNESS" wordmark (`text-[9px]
+  uppercase tracking-[0.14em] font-medium text-white-15`, the
+  panel-label recipe) → divider → **Show/Hide sidebar** (`PanelLeftOpen`
+  / `PanelLeftClose`, 16px, toggles `sidebarOpen`) → **Open folder**
+  (`FolderPlus`, 16px, calls `ipc.pickProjectFolder()` and sets
+  `workspacePath`) → divider → **Settings** (`Settings`, 16px) →
+  **Agent Manager** (`Bot`, 16px).
+- **Center cluster (Bip):** a 44×35 wrapper holding a 40×40 Bip mascot
+  rendered at `size={32}` (so the SVG fits the 36px strip with a 2px
+  halo bleed). No `glass-mist` pill around him — he lives directly in
+  the bar per AGENTS.md ("the top capsule bar"). `data-tauri-drag-region="false"`
+  on the wrapper so the bar still drags from the rest of its surface.
+  `onMouseEnter` opens the thought popover (portaled below).
+- **Right cluster (window controls):** Minimize (`Minus`, 12px),
+  Maximize/Restore (`Square` / `Copy`, 10px, swapped live via the resize
+  listener), Close (`X`, 12px).
+- **Bar button language:** every button on the bar is the same
+  `BarButton` helper — 36px full-strip-height target,
+  `text-white-50` at rest, hover lifts to white on `white-08` (active
+  `white-14`). Close is the only "danger" button: hover goes to
+  `status-error` on the same hover state, matching the rest of the
+  app's destructive language.
+- **Runtime guard:** `isTauri()` from `@tauri-apps/api/core` (with a
+  sync `__TAURI_INTERNALS__` shortcut) gates every `getCurrentWindow`
+  call. In plain-browser dev the buttons render but no-op without
+  throwing, so `npm run dev` keeps working.
+- **Maximized state:** tracked via `isMaximized()` + `onResized`.
+
+### Bip mascot (lives in `TitleBar.tsx`)
+
+Bip is the agent mascot, "the one sanctioned non-Lucide illustration"
+(AGENTS.md). He lives in the **center of the custom title bar** — no
+floating pill, no separate row. The four app actions flank him on the
+left, the three window controls on the right.
+
+- **Mood engine:** driven by `streamingRequestId`, `agentRequestId` and
+  `jobActivities` from the store. The motion class follows the mood:
+  `mascot-bob` (idle), `mascot-bob--fast` (working),
+  `mascot-bounce` + `<ConfettiBurst />` for 3.2s on terminal `chat-done`
+  / `agent-done`, `mascot-shake` for 5s on `chat-error` / `agent-error`.
+  Aria label reads `Agent status: <label>`. A soft `mascot-halo` div
+  behind Bip (tint per mood, see the `HALO` map) gives him an ambient
+  aura.
+- **Thought popover (Bip's thoughts):** portaled to `<body>` at
+  `z-[90]` so it floats above every overlay including the title bar.
+  Shared hover state between the Bip element and the popover so the
+  8px gap doesn't close it mid-read. Content:
+  - **Header:** mini Bip + "BIP'S THOUGHTS" label (10px uppercase
+    `text-white-30 tracking-wider`) + an inner monologue string that
+    varies by mood ("Streaming a reply — words incoming.", "That one
+    landed clean. Confetti earned.", "Something went sideways. Letting
+    the red glow show it.", etc.).
+  - **Active Tasks** section (when `jobActivities.length > 0`): list
+    of activities, each row a 4px green dot + label.
+  - **Agents** section (when `activeAgents.length > 0`): per-agent
+    row with role-tinted dot + name + role chip.
+  - **Turn** section: working state with `fill-accent-mint animate-pulse`
+    dot + "Agent turn running" / "Streaming response" / "Idle".
+  - **Session** section (when `activeModel` or `tokenStats` exists):
+    model label, last response tokens, cumulative session totals,
+    session-window usage %. Uses the same `text-[12px] text-white-30
+    flex-shrink-0` label / `text-white-50` value row recipe as the
+    ChatHeader telemetry.
+- **Why Bip moved into the title bar:** the original `ActiveJobBar`
+  floated below the bar as a glass-mist pill. With the title bar now
+  carrying the four app actions anyway, the floating pill was
+  redundant chrome — Bip now occupies the bar's center cell directly,
+  which honors AGENTS.md's "lives in the top capsule bar" instruction
+  more literally and saves vertical real estate.
+- **Why the capsule is the only floating control:** the title bar is
+  the load-bearing row for the four app actions and the three window
+  controls; the capsule's job is the mascot + status + telemetry
+  hover-panel. Keeping Bip in his own floating element (instead of
+  trying to fit him into the title bar) preserves the "mascot, status
+  glows, and tiny details only" rule in AGENTS.md and gives him room
+  to bob / bounce / shake without competing for chrome real estate.
 
 ### Agent controls (`Chat.tsx`, `AgentManager.tsx`)
 
@@ -364,6 +416,22 @@ block, stacked above the input:
   truncate`). Live entries come from `agent-tool-start` / `agent-tool-result`;
   persisted `activities` (now carrying `requestId` + `arguments`) rebuild the
   cards on session load. This replaces the old transient composer strip.
+- **Pending message queue** — while a generation is in flight the composer
+  is still live: sending (Enter or the send button) **queues the draft**
+  instead of dropping it, and the head of the queue auto-sends the moment
+  the current stream/agent turn ends (done, error, or cancelled). Queued
+  chips render above the input (`bg-surface-2 border-border-subtle rounded`,
+  truncated `text-[12px] text-white-50` preview) with inline **edit**
+  (pencil → text input, Enter saves / Esc cancels) and **discard** (×).
+  The queue is ephemeral — never persisted, cleared on session/project
+  switch. While streaming with a draft, the trailing buttons are:
+  **queue** (`ListPlus`), **stop & send** (`Zap` — cancels the current
+  generation and jumps the draft to the front of the queue), and **stop**
+  (`Square` — keeps the partial response; an empty placeholder is removed).
+- **Cancellation keeps partial output** — `chat-error cancelled` /
+  `agent-error cancelled` no longer delete the streaming message: whatever
+  content already streamed stays in the chat (the optimistic bubble is only
+  removed when nothing was generated).
 - **Agent Manager** (`AgentManager.tsx`) — modal opened from the Sessions
   panel's Bot button. Max-agents-per-session is a **custom `slider-quartz`
   range** (1–12): a 4px two-tone track filled by an inline `--slider-fill`
@@ -396,7 +464,7 @@ column via the live-measured `chatHeaderHeight` (`useLayoutEffect` +
 
 The sidebar is a single `position: fixed` flex column on the left edge,
 holding two `glass-mist` panels: **Content** (top) and **Sessions**
-(bottom). The chat / canvas fills the rest of the viewport. The gap
+(bottom). The chat / subagent region fills the rest of the viewport. The gap
 between the two panels is fixed at `PANEL_GAP` regardless of how tall
 Content gets, because they share one flex container.
 
@@ -549,27 +617,104 @@ column.
 > which failed the "barely a gap" requirement. The current single-column
 > flex layout makes the gap exact.
 
-### DynamicCanvas sub-tile (`DynamicCanvas.tsx`)
+### Subagent window manager (`WindowManager.tsx` + `SubagentWindow.tsx`)
 
-- A grid of 1 / 2 / 3 columns depending on panel count: `count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3`.
-- Each sub-tile is `bg-surface-1 border border-border-subtle` (no glass), with:
-  - **Header** at `bg-surface-2/50`, `border-b border-border-subtle`,
-    `px-3 py-1.5`. Contains a 6px `Circle` indicator (green + `animate-pulse`
-    while working, red/error, white-15/idle), the agent name in
-    `text-[12px] font-medium text-white`, the role in `text-[11px]
-    text-white-15`, and a 28×28 (`w-7 h-7`) `glass-quartz glass-quartz--pill`
-    close button with an `aria-label`.
-  - **Empty state** (no messages): centered hint in `text-[12px]
-    text-white-15` — "Message {agentName} to start a thread".
-  - **Body** `flex-1 overflow-y-auto p-3 space-y-2.5`. User messages in
-    `text-white-50`, assistant in `text-white` (via `MessageRenderer`),
-    both at `text-[13px]`.
-  - **Footer** `border-t border-border-subtle p-2`, with a `bg-surface-2
-    border border-border-subtle rounded focus-within:border-border-strong`
-    container holding the input (`bg-transparent text-[12px] text-white
-    px-3 py-2`, `placeholder:text-white-30`) and a Send button
-    (`glass-quartz glass-quartz--pill w-7 h-7`, disabled while the input
-    is empty).
+The Orchestrator (the chat agent) can dispatch subagent turns
+(Coder / Architect / Researcher / HealthMonitor) via the
+`delegate_subagent` tool. Each dispatch opens a **read-only** tiled
+viewer in the right-hand region of the app — the user cannot
+message subagents. Only the Health Agent can, via the
+`subagent_message` tool (a role-gated channel whose inbox the
+subagent's loop drains at the top of every round).
+
+**Tiling model (user-specified):**
+
+- The main chat window **never changes size** once a subagent spawns
+  — it just shifts left. Width is locked at `chatRatio` (default 0.5)
+  the moment the first subagent opens and never auto-resizes after.
+- The right-hand region opens for subagent windows.
+- **All subagent windows are always the same size regardless of
+  count** (i3-style equal grid): `cols = ceil(sqrt(n))`,
+  `rows = ceil(n / cols)`. A partially filled last row simply leaves
+  empty cells — no resizing the live windows.
+- The chat column is clamped to `MIN_CHAT_WIDTH` (320px) so the
+  Orchestrator conversation stays readable even in a narrow window;
+  the subagent region absorbs the remainder and the subagent tiles
+  shrink together.
+
+**Math lives in `src/lib/wm.ts`** (pure, UI-agnostic) with a
+`vitest` cover: `gridDims(count) → { cols, rows }`,
+`computeTiles(count, w, h, gap) → Tile[]`, `chatSplit(containerW,
+ratio, minChatW) → { chatWidth, subagentWidth }`. The
+`WindowManager` component just calls `computeTiles` against the
+measured region size; the components are dumb renderers.
+
+**Per-window structure (`SubagentWindow.tsx`):**
+
+- **Header** — `bg-surface-2/50 border-b border-border-subtle
+  px-3 py-1.5`. 6px `Circle` status dot (green + `animate-pulse` while
+  working, red on error, yellow on cancelled, white-15 on done),
+  name in `text-[12px] font-medium text-white`, role in `text-[10px]
+  text-white-30`. Trailing cluster: 24×24 stop button (working
+  only) + 24×24 close (X). Closing a working subagent cancels it;
+  closing a finished one just removes the window.
+- **Task line** — `text-[11px] text-white-30` on `bg-surface-1`,
+  border-b. `Task:` label in `text-white-15` + the delegation text
+  in `text-white-50`. Locks in the context the Orchestrator handed
+  off.
+- **Body** — `flex-1 overflow-y-auto px-3 py-2 space-y-2`. Stack
+  order: tool call cards (if any) → Health Monitor inbox bubbles
+  (read-only, surfaced as the only "incoming" message a subagent
+  viewer shows) → the streamed content via `MessageRenderer`
+  (with collapsible Thinking block, same recipe as the chat) →
+  typing indicator while working. Terminal empty-state: italic
+  `(no output)` / `(cancelled)` / `{error}` depending on status.
+- **Approval footer** — `border-t border-border-subtle bg-surface-2`.
+  Only when the subagent loop emits an `agent-approval-request` for
+  this request id. Renders the `ShieldCheck` + tool name + summary
+  + Allow (green) / Deny (red) buttons. Routes through
+  `respondSubagentApproval` which clears the window's own approval
+  card (separate from the Orchestrator's `pendingApproval`) and
+  dispatches the answer via the shared `respond_approval` IPC.
+
+**Lifecycle / event routing** (`src/lib/subagent-manager.ts`):
+
+- All `agent-*` events (turn-start, chunk, reasoning, tool-start,
+  tool-result, approval-request, approval-result, done, error) are
+  routed by request-id prefix. `sub-<uuid>` → subagent slice;
+  everything else → Orchestrator chat. `session-manager.ts` adds a
+  defensive `isOrchestratorRequestId` guard on every handler so a
+  stray `sub-` event can never clobber the chat.
+- `agent-turn-start` for `sub-` ids carries a `subagent: { name,
+  role, task, personalityId }` payload (no registry round-trip
+  needed) and **locks the chat ratio** to the default the moment
+  the first subagent spawns.
+- The chat **reflows back to its original full-width / centered
+  position the moment every subagent reaches a terminal state**
+  (done / error / cancelled). The trigger is "no working
+  subagents left" (not "no subagents in the registry"): a finished
+  record collapses its viewer, the chat column regains the full
+  content width, and the `chatRatio` lock is cleared so the next
+  spawn starts from a fresh default. Final answers are preserved
+  in the Orchestrator's chat via the `delegate_subagent` tool
+  result — the subagent viewer doesn't need to stay open for the
+  user to see the result.
+- The `subagent-message` event (Health Agent → subagent inbox) is
+  the only way a subagent viewer can receive text while running.
+  The user CANNOT type into a subagent window — there is no
+  composer.
+- On WebView mount, `list_subagents` resyncs the registry mirror
+  so a reload reopens every still-tracked subagent window with the
+  final answer + status (live content for in-flight subagents is
+  gone — the user sees the eventual terminal content if the agent
+  loop reports a fresh done for the same request id). If the
+  resync returns only terminal records, the chat reflows
+  immediately (no live work → no tiling lock).
+
+The legacy `DynamicCanvas.tsx` (per-panel composer + 1/2/2/3
+column heuristic) is retired — the file remains as an empty stub
+so legacy imports resolve. `canvasPanels` / `CanvasPanel` /
+`addCanvasPanel` etc. are gone from the store.
 
 ### Settings modal (`Settings.tsx`)
 

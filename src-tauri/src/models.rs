@@ -471,6 +471,29 @@ pub fn write_active_model(id: Option<&str>) {
     }
 }
 
+/// Resolve which saved-model id a personality should run with, falling
+/// back to `fallback` (the active chat model) when the personality has
+/// no bound model or the bound model no longer exists in the
+/// saved-models store. Used by the `delegate_subagent` tool at dispatch
+/// time; mirrors `commands::resolve_active_model_for_personality`
+/// without needing the keyring (existence in the catalog is enough).
+pub async fn resolve_personality_model(
+    personality: &crate::personalities::AgentPersonality,
+    fallback: &str,
+) -> String {
+    match personality.model_id.as_ref() {
+        Some(model_id) => {
+            let file = read_models_file().await.unwrap_or_default();
+            if file.models.iter().any(|m| m.id == *model_id) {
+                model_id.clone()
+            } else {
+                fallback.to_string()
+            }
+        }
+        None => fallback.to_string(),
+    }
+}
+
 // ===== Per-model prefs =====
 
 pub fn read_model_prefs(id: &str) -> ModelPrefs {

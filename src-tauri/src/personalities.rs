@@ -155,7 +155,10 @@ pub async fn load_personalities() -> Result<PersonalityRoster, String> {
                 ROSTER_VERSION, ts
             ));
             if let Err(rename_err) = fs::rename(&path, &archived).await {
-                eprintln!("[harness] failed to archive corrupt personalities: {}", rename_err);
+                eprintln!(
+                    "[harness] failed to archive corrupt personalities: {}",
+                    rename_err
+                );
             }
             let roster = PersonalityRoster::default();
             save_personalities(&roster).await?;
@@ -306,9 +309,7 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_role_is_rejected_from_builtin_id() {
         // Defensive: the Orchestrator must never get a roster id.
-        let result = std::panic::catch_unwind(|| {
-            builtin_personality_id(AgentRole::Orchestrator)
-        });
+        let result = std::panic::catch_unwind(|| builtin_personality_id(AgentRole::Orchestrator));
         assert!(result.is_err(), "expected panic for non-subagent role");
     }
 
@@ -429,7 +430,9 @@ mod tests {
         let _g = DataDirGuard::new();
         // Ensure a roster exists.
         let _ = load_personalities().await.unwrap();
-        let result = get_personality("definitely-not-a-personality").await.unwrap();
+        let result = get_personality("definitely-not-a-personality")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 }

@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Harness",
         "width": 1280,
         "height": 800,
@@ -22,7 +23,8 @@
         "backgroundColor": "#000000",
         "transparent": false,
         "resizable": true,
-        "center": true
+        "center": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

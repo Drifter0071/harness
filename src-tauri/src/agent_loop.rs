@@ -30,12 +30,13 @@ use crate::llm_client::{
     ToolSpec, TurnOutcome,
 };
 use crate::models::ReasoningEffort;
+use crate::personalities::AgentPersonality;
 use crate::secrets::SecretStore;
 use crate::session::{
     save_session, ActionMode, LastTurn, Message, Session, TokenStats, ToolActivity,
     ToolActivityStatus,
 };
-use crate::tools::{execute_tool, ToolContext, ToolResult};
+use crate::tools::{execute_tool, SubagentDispatchContext, ToolContext, ToolResult};
 
 /// Hard cap on LLM rounds inside one turn (each round may execute tools).
 const MAX_ROUNDS: usize = 24;
@@ -50,12 +51,37 @@ const CONTINUE_MARKER: &str = "[continue]";
 /// Cap on goal-mode continuation turns after the first.
 const GOAL_MAX_TURNS: usize = 8;
 
+/// Whether a turn's session mutations are written to disk. Chat turns
+/// (`Real`) persist to `<project>/.harness/sessions/`; dispatched
+/// subagent turns run against a scratch session and never touch disk —
+/// their content is delivered to the user via streamed events and to
+/// the orchestrator via the `delegate_subagent` tool result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistMode {
+    Real,
+    Scratch,
+}
+
 // -- Event wire types (camelCase, routed by `requestId` on the frontend) --
+
+/// Metadata attached to `agent-turn-start` when the turn is a dispatched
+/// subagent (requestId starts with `sub-`). Lets the canvas open a
+/// labeled window without an extra registry round-trip.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentStartInfo {
+    pub personality_id: String,
+    pub name: String,
+    pub role: AgentRole,
+    pub task: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnStartEvent<'a> {
     request_id: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent: Option<SubagentStartInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,11 +296,7 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
         .collect()
 }
 
-fn build_system_prompt(
-    orchestrator_prompt: &str,
-    workspace: &str,
-    goal_mode: bool,
-) -> String {
+fn build_system_prompt(orchestrator_prompt: &str, workspace: &str, goal_mode: bool) -> String {
     let mut prompt = orchestrator_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
@@ -411,8 +433,11 @@ fn push_activity(
 
 /// Persist the session after any mutation. `save_session` forces version 2,
 /// rewrites `updatedAt` and auto-titles; failures are logged, not fatal to
-/// the in-memory turn.
-async fn persist(session: &mut Session) {
+/// the in-memory turn. Scratch turns (subagents) skip disk entirely.
+async fn persist(session: &mut Session, mode: PersistMode) {
+    if mode == PersistMode::Scratch {
+        return;
+    }
     if let Err(e) = save_session(&session.project_path, session.clone()).await {
         eprintln!(
             "agent_loop: failed to persist session {}: {}",
@@ -429,8 +454,13 @@ async fn persist(session: &mut Session) {
 /// The frontend uses this as a disk-based completion signal when
 /// streaming events don't reach the WebView, so responses still appear
 /// without a manual refresh.
-async fn mark_turn_complete(session: &mut Session, request_id: &str, status: &str) {
-    mark_turn_complete_with_reasoning(session, request_id, status, None).await;
+async fn mark_turn_complete(
+    session: &mut Session,
+    request_id: &str,
+    status: &str,
+    mode: PersistMode,
+) {
+    mark_turn_complete_with_reasoning(session, request_id, status, None, mode).await;
 }
 
 async fn mark_turn_complete_with_reasoning(
@@ -438,6 +468,7 @@ async fn mark_turn_complete_with_reasoning(
     request_id: &str,
     status: &str,
     reasoning: Option<String>,
+    mode: PersistMode,
 ) {
     session.last_turn = Some(LastTurn {
         request_id: request_id.to_string(),
@@ -445,7 +476,7 @@ async fn mark_turn_complete_with_reasoning(
         at: now_iso(),
         reasoning: reasoning.filter(|r| !r.is_empty()),
     });
-    persist(session).await;
+    persist(session, mode).await;
 }
 
 // -- Stall detection --
@@ -501,6 +532,7 @@ pub fn run_agent_turn(
     in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
     completer: Arc<dyn TurnCompleter>,
     reasoning_effort: Option<ReasoningEffort>,
+    dispatch: Option<SubagentDispatchContext>,
 ) -> JoinHandle<()> {
     tokio::spawn(run_agent_turn_inner(
         request_id,
@@ -515,11 +547,12 @@ pub fn run_agent_turn(
         in_flight,
         completer,
         reasoning_effort,
+        dispatch,
     ))
 }
 
 /// How a turn ended, after the final message is persisted.
-enum TurnFinish {
+pub enum TurnFinish {
     Done {
         content: String,
         reasoning: String,
@@ -531,29 +564,58 @@ enum TurnFinish {
     },
 }
 
-/// Resolved chat-agent bundle for a turn. After the v3
-/// chat-agent-as-orchestrator refactor, every chat turn is the
-/// Orchestrator; the per-turn bundle carries the orchestrator's
-/// stable id / name (used to label assistant messages), the role
-/// (used to gate role-restricted tools), the orchestrator's system
-/// prompt, and the model id the frontend picked for chat.
+/// Resolved turn-agent bundle. Every chat turn runs the Orchestrator
+/// (built from the code constant via `orchestrator()`); dispatched
+/// subagent turns build one from a roster personality via
+/// `from_personality`. The bundle carries the stable id / name used to
+/// label assistant messages, the role (which gates role-restricted
+/// tools like `bip` and `delegate_subagent`), the system prompt, and
+/// the model id the turn runs against.
 #[derive(Debug, Clone)]
-struct ResolvedAgent {
+pub struct ResolvedAgent {
     /// Stable id used to label messages and session summary.
-    /// Always `ORCHESTRATOR_AGENT_ID` ("orchestrator").
     personality_id: String,
-    /// Human-readable label for the chat agent.
+    /// Human-readable label for the agent.
     name: String,
-    /// The chat agent's role â€” always `AgentRole::Orchestrator` â€”
-    /// threaded into the tool context so role-gated tools (like
-    /// `bip`) can check the caller's role.
+    /// The agent's role â€” threaded into the tool context so
+    /// role-gated tools can check the caller.
     role: AgentRole,
-    /// The orchestrator's system prompt (code constant).
+    /// The agent's system prompt (code constant for the Orchestrator,
+    /// roster prompt for subagents).
     system_prompt: String,
-    /// The model id the frontend picked for chat. The chat agent
-    /// doesn't use per-personality model overrides (those are for
-    /// subagent dispatch, future work).
+    /// The model id this turn runs against.
     model_id: String,
+}
+
+impl ResolvedAgent {
+    /// The chat agent bundle: always the Orchestrator with its code
+    /// constant prompt and the frontend-picked chat model.
+    pub fn orchestrator(chat_model_id: &str) -> Self {
+        Self {
+            personality_id: crate::session::ORCHESTRATOR_AGENT_ID.to_string(),
+            name: "Orchestrator".to_string(),
+            role: AgentRole::Orchestrator,
+            system_prompt: crate::agent::ORCHESTRATOR_PROMPT.to_string(),
+            model_id: chat_model_id.to_string(),
+        }
+    }
+
+    /// Build the bundle for a dispatched subagent from a roster
+    /// personality. `resolved_model_id` is the personality's bound
+    /// model when it exists, else the orchestrator's chat model.
+    pub fn from_personality(personality: &AgentPersonality, resolved_model_id: &str) -> Self {
+        Self {
+            personality_id: personality.id.clone(),
+            name: personality.name.clone(),
+            role: personality.role,
+            system_prompt: if personality.system_prompt.trim().is_empty() {
+                personality.role.default_prompt().to_string()
+            } else {
+                personality.system_prompt.clone()
+            },
+            model_id: resolved_model_id.to_string(),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,20 +632,13 @@ async fn run_agent_turn_inner(
     in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
     completer: Arc<dyn TurnCompleter>,
     reasoning_effort: Option<ReasoningEffort>,
+    dispatch: Option<SubagentDispatchContext>,
 ) {
-    // The chat agent is always the Orchestrator. The orchestrator's
-    // system prompt is a code constant; the chat model is whatever the
-    // frontend passed in (`run_agent_turn`). Subagent personalities
-    // (Coder, Architect, Researcher, HealthMonitor) live in the global
-    // roster and are read live by the future subagent dispatch loop
-    // (out of scope for v0).
-    let resolved = ResolvedAgent {
-        personality_id: crate::session::ORCHESTRATOR_AGENT_ID.to_string(),
-        name: "Orchestrator".to_string(),
-        role: AgentRole::Orchestrator,
-        system_prompt: crate::agent::ORCHESTRATOR_PROMPT.to_string(),
-        model_id: chat_model_id.clone(),
-    };
+    // The chat agent is always the Orchestrator: code-constant prompt,
+    // frontend-picked chat model, no roster row. Subagent personalities
+    // (Coder, Architect, Researcher, HealthMonitor) are dispatched via
+    // the `delegate_subagent` tool, which runs its own subagent turn.
+    let resolved = ResolvedAgent::orchestrator(&chat_model_id);
 
     let outcome = run_turn_core(
         &request_id,
@@ -598,12 +653,28 @@ async fn run_agent_turn_inner(
         &in_flight,
         completer.as_ref(),
         reasoning_effort,
+        PersistMode::Real,
+        dispatch.as_ref(),
     )
     .await;
 
     // Turn finished (success, error or cancellation): deregister, then
     // emit the terminal event.
     let _ = in_flight.remove(&request_id);
+    finish_and_emit(&request_id, &mut session, &sink, outcome, PersistMode::Real).await;
+}
+
+/// Emit the terminal event for a finished turn and return the outcome
+/// for callers that need the final content (the subagent dispatcher).
+/// The cancelled branch stamps the disk marker when the mode is `Real`
+/// so the session file still carries a completion signal.
+async fn finish_and_emit(
+    request_id: &str,
+    session: &mut Session,
+    sink: &Arc<dyn AgentEventSink>,
+    outcome: Result<TurnFinish, ()>,
+    mode: PersistMode,
+) -> TurnFinish {
     match outcome {
         Ok(TurnFinish::Done {
             content,
@@ -613,45 +684,153 @@ async fn run_agent_turn_inner(
             sink.emit(
                 "agent-done",
                 json!(DoneEvent {
-                    request_id: &request_id,
+                    request_id,
                     content: &content,
                     reasoning: &reasoning,
-                    usage
+                    usage: usage.clone()
                 }),
             );
+            TurnFinish::Done {
+                content,
+                reasoning,
+                usage,
+            }
         }
         Ok(TurnFinish::Error { kind, message }) => {
             sink.emit(
                 "agent-error",
                 json!(ErrorEvent {
-                    request_id: &request_id,
+                    request_id,
                     kind: &kind,
                     message: &message
                 }),
             );
+            TurnFinish::Error { kind, message }
         }
         Err(()) => {
             // Cancellation happened before the loop's `mark_turn_complete`
-            // ran. Stamp the marker here so the session file still carries
-            // a completion signal and the frontend can clear the
-            // placeholder.
+            // ran. Stamp the marker so the session file still carries a
+            // completion signal and the frontend can clear the placeholder.
             session.last_turn = Some(LastTurn {
-                request_id: request_id.clone(),
+                request_id: request_id.to_string(),
                 status: "cancelled".to_string(),
                 at: now_iso(),
                 reasoning: None,
             });
-            let _ = save_session(&session.project_path, session.clone()).await;
+            if mode == PersistMode::Real {
+                let _ = save_session(&session.project_path, session.clone()).await;
+            }
             sink.emit(
                 "agent-error",
                 json!(ErrorEvent {
-                    request_id: &request_id,
+                    request_id,
                     kind: "cancelled",
-                    message: "Agent turn cancelled by the user",
+                    message: "Agent turn cancelled",
                 }),
             );
+            TurnFinish::Error {
+                kind: "cancelled".to_string(),
+                message: "Agent turn cancelled".to_string(),
+            }
         }
     }
+}
+
+/// Kick off one dispatched subagent turn. The turn runs against a
+/// scratch (non-persisted) session, streams the standard `agent-*`
+/// events under its `sub-<uuid>` request id, and resolves to the final
+/// `TurnFinish` so the `delegate_subagent` tool executor can update the
+/// registry and hand the answer back to the orchestrator.
+#[allow(clippy::too_many_arguments)]
+pub fn run_subagent_turn(
+    request_id: String,
+    resolved: ResolvedAgent,
+    task: String,
+    action_mode: ActionMode,
+    workspace: String,
+    sink: Arc<dyn AgentEventSink>,
+    pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
+    in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
+    completer: Arc<dyn TurnCompleter>,
+    reasoning_effort: Option<ReasoningEffort>,
+    dispatch: Option<SubagentDispatchContext>,
+) -> JoinHandle<TurnFinish> {
+    tokio::spawn(run_subagent_turn_inner(
+        request_id,
+        resolved,
+        task,
+        action_mode,
+        workspace,
+        sink,
+        pending_approvals,
+        in_flight,
+        completer,
+        reasoning_effort,
+        dispatch,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_subagent_turn_inner(
+    request_id: String,
+    resolved: ResolvedAgent,
+    task: String,
+    action_mode: ActionMode,
+    workspace: String,
+    sink: Arc<dyn AgentEventSink>,
+    pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
+    in_flight: Arc<DashMap<String, watch::Sender<bool>>>,
+    completer: Arc<dyn TurnCompleter>,
+    reasoning_effort: Option<ReasoningEffort>,
+    dispatch: Option<SubagentDispatchContext>,
+) -> TurnFinish {
+    // Scratch session: subagent turns never touch the session store.
+    // The orchestrator's session only records the `delegate_subagent`
+    // tool call + result; the subagent's own content lives in the
+    // streamed events and the final tool result.
+    let mut session = Session {
+        version: 2,
+        id: request_id.clone(),
+        title: resolved.name.clone(),
+        project_path: workspace.clone(),
+        created_at: now_iso(),
+        updated_at: now_iso(),
+        agent: crate::session::default_agent_snapshot(),
+        goal_mode: false,
+        action_mode: action_mode.clone(),
+        messages: Vec::new(),
+        activities: Vec::new(),
+        token_stats: None,
+        last_turn: None,
+    };
+
+    let outcome = run_turn_core(
+        &request_id,
+        &mut session,
+        &resolved,
+        &task,
+        &action_mode,
+        false,
+        &workspace,
+        &sink,
+        &pending_approvals,
+        &in_flight,
+        completer.as_ref(),
+        reasoning_effort,
+        PersistMode::Scratch,
+        dispatch.as_ref(),
+    )
+    .await;
+
+    let _ = in_flight.remove(&request_id);
+    finish_and_emit(
+        &request_id,
+        &mut session,
+        &sink,
+        outcome,
+        PersistMode::Scratch,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -668,6 +847,8 @@ async fn run_turn_core(
     in_flight: &Arc<DashMap<String, watch::Sender<bool>>>,
     completer: &dyn TurnCompleter,
     reasoning_effort: Option<ReasoningEffort>,
+    mode: PersistMode,
+    dispatch: Option<&SubagentDispatchContext>,
 ) -> Result<TurnFinish, ()> {
     let (cancel_tx, mut cancel_rx) = new_cancel_token();
     in_flight.insert(request_id.to_string(), cancel_tx);
@@ -678,10 +859,29 @@ async fn run_turn_core(
     // terminal event.
     if session.last_turn.is_some() {
         session.last_turn = None;
-        persist(session).await;
+        persist(session, mode).await;
     }
 
-    sink.emit("agent-turn-start", json!(TurnStartEvent { request_id }));
+    // Subagent turns (anything but the Orchestrator) attach their
+    // identity + task to the turn-start event so the canvas can open a
+    // labeled window without a registry round-trip.
+    let subagent = if resolved.role == AgentRole::Orchestrator {
+        None
+    } else {
+        Some(SubagentStartInfo {
+            personality_id: resolved.personality_id.clone(),
+            name: resolved.name.clone(),
+            role: resolved.role,
+            task: message_text.to_string(),
+        })
+    };
+    sink.emit(
+        "agent-turn-start",
+        json!(TurnStartEvent {
+            request_id,
+            subagent
+        }),
+    );
 
     // Message history: prior session text + the new user message. The
     // assistant turn output (with tool-call echoes and tool results) is
@@ -698,15 +898,45 @@ async fn run_turn_core(
     let mut llm_rounds = 0usize;
     let mut goal_turns = 0usize;
     let mut stall_ring: VecDeque<StallProbe> = VecDeque::with_capacity(STALL_WINDOW);
-    let tools = ToolSpec::all();
+    // Subagents get a reduced toolset: no `delegate_subagent` (prevents
+    // unbounded recursion — only the Orchestrator may spawn) and no
+    // role-gated meta-tools that aren't theirs.
+    let tools = if resolved.role == AgentRole::Orchestrator {
+        ToolSpec::all()
+    } else {
+        ToolSpec::subagent()
+    };
 
     loop {
+        // Drain any messages the Health Agent pushed into this turn's
+        // inbox via the `subagent_message` tool. They enter the
+        // conversation as `[Health Monitor]` user messages so the
+        // subagent can react to them. Drained = removed, so they are
+        // fed exactly once even across multiple LLM rounds.
+        if let Some(dispatch) = dispatch {
+            if let Some(entry) = dispatch.inbox.get(request_id) {
+                let mut guard = entry.value().lock().await;
+                let drained: Vec<String> = guard.drain(..).collect();
+                for msg in drained {
+                    let text = format!("[Health Monitor] {msg}");
+                    user_message(session, &text);
+                    messages.push(ToolChatMessage {
+                        role: "user".into(),
+                        content: text,
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                    });
+                }
+            }
+        }
+
         if llm_rounds >= MAX_ROUNDS {
             return Ok(finish_error(
                 session,
                 "loop_cap",
                 "Agent turn exceeded the maximum number of LLM rounds",
                 Some(request_id),
+                mode,
             )
             .await);
         }
@@ -786,7 +1016,7 @@ async fn run_turn_core(
                 Ok(o) => o,
                 Err(e) => {
                     let (kind, msg) = error_vocab(&e);
-                    return Ok(finish_error(session, kind, msg, Some(request_id)).await);
+                    return Ok(finish_error(session, kind, msg, Some(request_id), mode).await);
                 }
             }
         };
@@ -814,7 +1044,7 @@ async fn run_turn_core(
             resolved,
         );
         merge_usage(&mut session.token_stats, &outcome.usage);
-        persist(session).await;
+        persist(session, mode).await;
 
         // -- Execute requested tool calls --
         if !outcome.tool_calls.is_empty() {
@@ -843,11 +1073,13 @@ async fn run_turn_core(
                     request_id,
                     session,
                     workspace,
-                    &resolved,
+                    resolved,
                     call,
                     &mut messages,
                     sink,
                     &mut stall_ring,
+                    mode,
+                    dispatch,
                 )
                 .await;
             }
@@ -857,6 +1089,7 @@ async fn run_turn_core(
                     "stalled",
                     format!("Agent repeated the same {} call without effect", name),
                     Some(request_id),
+                    mode,
                 )
                 .await);
             }
@@ -872,6 +1105,7 @@ async fn run_turn_core(
                     "loop_cap",
                     "Goal loop exceeded the maximum number of continuation turns",
                     Some(request_id),
+                    mode,
                 )
                 .await);
             }
@@ -890,7 +1124,7 @@ async fn run_turn_core(
         // file reflects completion even if the in-process Tauri event never
         // reaches the WebView.
         let reasoning = (!outcome.reasoning.is_empty()).then(|| outcome.reasoning.clone());
-        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning).await;
+        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning, mode).await;
         return Ok(TurnFinish::Done {
             content: final_text,
             reasoning: outcome.reasoning,
@@ -923,6 +1157,7 @@ async fn finish_error(
     kind: &str,
     message: impl Into<String>,
     request_id: Option<&str>,
+    mode: PersistMode,
 ) -> TurnFinish {
     let message = message.into();
     push_activity(
@@ -934,9 +1169,9 @@ async fn finish_error(
         None,
     );
     if let Some(rid) = request_id {
-        mark_turn_complete(session, rid, "error").await;
+        mark_turn_complete(session, rid, "error", mode).await;
     } else {
-        persist(session).await;
+        persist(session, mode).await;
     }
     TurnFinish::Error {
         kind: kind.to_string(),
@@ -1028,6 +1263,7 @@ async fn gate_tool(
 
 /// Execute one approved tool call, feed its result back to the model,
 /// emit the result event and record the activity.
+#[allow(clippy::too_many_arguments)]
 async fn execute_one(
     request_id: &str,
     session: &mut Session,
@@ -1037,6 +1273,8 @@ async fn execute_one(
     messages: &mut Vec<ToolChatMessage>,
     sink: &Arc<dyn AgentEventSink>,
     stall_ring: &mut VecDeque<StallProbe>,
+    mode: PersistMode,
+    dispatch: Option<&SubagentDispatchContext>,
 ) {
     sink.emit(
         "agent-tool-start",
@@ -1048,13 +1286,11 @@ async fn execute_one(
         }),
     );
 
-    let result = match execute_tool(
-        &ToolContext::for_agent(workspace, resolved.role, sink.clone()),
-        &call.name,
-        &call.arguments,
-    )
-    .await
-    {
+    let mut ctx = ToolContext::for_agent(workspace, resolved.role, sink.clone());
+    if let Some(d) = dispatch {
+        ctx = ctx.with_subagent(d.clone());
+    }
+    let result = match execute_tool(&ctx, &call.name, &call.arguments).await {
         Ok(r) => r,
         Err(e) => ToolResult {
             ok: false,
@@ -1077,7 +1313,7 @@ async fn execute_one(
         Some(request_id),
         Some(&call.arguments),
     );
-    persist(session).await;
+    persist(session, mode).await;
 
     // The tool result is the model's context for the next round.
     let mut content = summary.clone();
@@ -1262,6 +1498,7 @@ mod tests {
             rig.pending.clone(),
             rig.in_flight.clone(),
             completer_dyn,
+            None,
             None,
         );
         handle.await.unwrap();
@@ -1521,5 +1758,126 @@ mod tests {
         assert_eq!(errors[0]["kind"], "cancelled");
         // The guard resolved the pending approval as denied and removed it.
         assert!(rig.pending.is_empty());
+    }
+
+    fn coder_personality() -> AgentPersonality {
+        AgentPersonality {
+            id: "builtin-coder".into(),
+            name: "Coder".into(),
+            role: AgentRole::Coder,
+            system_prompt: String::new(),
+            model_id: None,
+            builtin: true,
+        }
+    }
+
+    /// A `SubagentDispatchContext` with everything the loop needs to run
+    /// a subagent turn in-memory (no disk, no network).
+    fn dispatch_rig(
+        completer: &Arc<MockCompleter>,
+        sink: &Arc<MemSink>,
+        workspace: &str,
+    ) -> SubagentDispatchContext {
+        SubagentDispatchContext {
+            subagents: Arc::new(DashMap::new()),
+            inbox: Arc::new(DashMap::new()),
+            completer: completer.clone(),
+            pending_approvals: Arc::new(DashMap::new()),
+            in_flight: Arc::new(DashMap::new()),
+            sink: sink.clone(),
+            workspace: workspace.to_string(),
+            action_mode: ActionMode::Auto,
+            reasoning_effort: None,
+            chat_model_id: "test-model".into(),
+            request_id: "parent-1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_turn_runs_scratch_and_streams_start_info() {
+        let completer = Arc::new(MockCompleter::new(vec![text_outcome("done", 1, 1)]));
+        let sink = Arc::new(MemSink::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_string_lossy().to_string();
+        let dispatch = dispatch_rig(&completer, &sink, &workspace);
+        let pending = dispatch.pending_approvals.clone();
+        let in_flight = dispatch.in_flight.clone();
+
+        let resolved = ResolvedAgent::from_personality(&coder_personality(), "test-model");
+        let handle = run_subagent_turn(
+            "sub-1".into(),
+            resolved,
+            "do the thing".into(),
+            ActionMode::Auto,
+            workspace.clone(),
+            sink.clone(),
+            pending,
+            in_flight,
+            completer,
+            None,
+            Some(dispatch),
+        );
+        let finish = handle.await.unwrap();
+        match finish {
+            TurnFinish::Done { content, .. } => assert_eq!(content, "done"),
+            _ => panic!("expected Done"),
+        }
+
+        // The turn-start event carried the subagent identity so the
+        // canvas can open a labeled window without a registry round-trip.
+        let starts = probe(&sink, "agent-turn-start");
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["subagent"]["name"], "Coder");
+        assert_eq!(starts[0]["subagent"]["role"], "Coder");
+        assert_eq!(starts[0]["subagent"]["task"], "do the thing");
+        assert_eq!(starts[0]["requestId"], "sub-1");
+        // The terminal event also fired under the sub- request id.
+        assert_eq!(probe(&sink, "agent-done").len(), 1);
+
+        // Scratch: no `.harness/sessions` directory was ever created.
+        assert!(!tmp.path().join(".harness").exists());
+    }
+
+    #[tokio::test]
+    async fn subagent_drains_health_inbox_into_conversation() {
+        let completer = Arc::new(MockCompleter::new(vec![text_outcome("ok", 1, 1)]));
+        let sink = Arc::new(MemSink::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_string_lossy().to_string();
+        let dispatch = dispatch_rig(&completer, &sink, &workspace);
+        // Preload the subagent's inbox as the Health Agent would via the
+        // `subagent_message` tool.
+        dispatch.inbox.insert(
+            "sub-1".into(),
+            tokio::sync::Mutex::new(vec!["be careful".into()]),
+        );
+
+        let resolved = ResolvedAgent::from_personality(&coder_personality(), "test-model");
+        let handle = run_subagent_turn(
+            "sub-1".into(),
+            resolved,
+            "task".into(),
+            ActionMode::Auto,
+            workspace,
+            sink,
+            dispatch.pending_approvals.clone(),
+            dispatch.in_flight.clone(),
+            completer.clone(),
+            None,
+            Some(dispatch),
+        );
+        handle.await.unwrap();
+
+        // The provider request contains the health message as a user turn
+        // (drained exactly once — the inbox is empty afterwards).
+        let requests = completer.requests();
+        assert_eq!(requests.len(), 1);
+        let user_msgs: Vec<&str> = requests[0]
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(user_msgs.contains(&"[Health Monitor] be careful"));
     }
 }

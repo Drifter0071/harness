@@ -441,7 +441,6 @@ pub async fn create_session(
     // the legacy deserialized fields if the caller sent any, and
     // dropped on the next save.
     let agent = agent.unwrap_or_default();
-    };
     let session = Session {
         version: 2,
         id: id.clone(),
@@ -1324,10 +1323,10 @@ mod tests {
         let parsed: Session = serde_json::from_str(from_ts).unwrap();
         assert_eq!(parsed.project_path, "/p");
         assert_eq!(parsed.version, 1); // normalized to 2 on save
-        // v1 sessions carried the personality inline as `id`. The
-        // v3 deserializer (this revision) keeps the legacy field
-        // around for back-compat reads but no longer treats the value
-        // as a personality id — the chat is always the Orchestrator.
+                                       // v1 sessions carried the personality inline as `id`. The
+                                       // v3 deserializer (this revision) keeps the legacy field
+                                       // around for back-compat reads but no longer treats the value
+                                       // as a personality id — the chat is always the Orchestrator.
         assert_eq!(parsed.agent.id.as_deref(), Some("harness"));
     }
 }

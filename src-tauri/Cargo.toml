@@ -13,13 +13,17 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# "compression" brotli-compresses the embedded frontend assets at build
+# time (the ~4 MB dist/ is the single biggest contributor to exe size).
 tauri = { version = "2", features = ["compression"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# Narrowed from "full" — only the modules the code actually uses
+# (sync/task/time/fs/process + what reqwest and the HCI server need).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "process", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

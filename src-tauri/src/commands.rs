@@ -40,6 +40,14 @@ pub struct AppState {
     /// before the next event fires. See
     /// `docs/superpowers/specs/2026-08-13--bip-mascot-tool.md`.
     pub bip_state: Arc<RwLock<BipState>>,
+    /// Registry of dispatched subagent turns keyed by their `sub-<uuid>`
+    /// request id. Written by the `delegate_subagent` tool, read by
+    /// `list_subagents` and the WebView-reconnect resync.
+    pub subagents: Arc<dashmap::DashMap<String, crate::agent::SubagentRecord>>,
+    /// Per-subagent message inboxes keyed by request id. The Health
+    /// Agent delivers messages via the `subagent_message` tool; each
+    /// subagent's turn drains its own inbox every LLM round.
+    pub subagent_inbox: Arc<dashmap::DashMap<String, tokio::sync::Mutex<Vec<String>>>>,
 }
 
 impl AppState {
@@ -52,6 +60,8 @@ impl AppState {
             pending_approvals: Arc::new(dashmap::DashMap::new()),
             session_watcher: Arc::new(Mutex::new(None)),
             bip_state: Arc::new(RwLock::new(BipState::default())),
+            subagents: Arc::new(dashmap::DashMap::new()),
+            subagent_inbox: Arc::new(dashmap::DashMap::new()),
         }
     }
 }
@@ -433,6 +443,24 @@ pub async fn run_agent_turn(
         crate::agent_loop::LlmClientTurner::new(state.secrets.clone()),
     );
 
+    // The orchestrator turn carries the subagent dispatch machinery:
+    // registry, inboxes, and the runner. This is what lets the
+    // `delegate_subagent` / `subagent_message` tools work from inside
+    // the agent loop.
+    let dispatch = crate::tools::SubagentDispatchContext {
+        subagents: state.subagents.clone(),
+        inbox: state.subagent_inbox.clone(),
+        completer: completer.clone(),
+        pending_approvals: state.pending_approvals.clone(),
+        in_flight: state.agent_in_flight.clone(),
+        sink: sink.clone(),
+        workspace: workspace.clone(),
+        action_mode: action_mode.clone(),
+        reasoning_effort,
+        chat_model_id: model_id.clone(),
+        request_id: request_id.clone(),
+    };
+
     crate::agent_loop::run_agent_turn(
         request_id,
         session,
@@ -446,8 +474,25 @@ pub async fn run_agent_turn(
         state.agent_in_flight.clone(),
         completer,
         reasoning_effort,
+        Some(dispatch),
     );
     Ok(())
+}
+
+/// List every dispatched subagent turn (registry snapshot), newest
+/// first. The frontend calls this to resync subagent windows after a
+/// WebView reload; live content still streams via the `agent-*` events.
+#[tauri::command]
+pub async fn list_subagents(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::agent::SubagentRecord>, String> {
+    let mut records: Vec<_> = state
+        .subagents
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    Ok(records)
 }
 
 /// Resolve a pending tool approval. No-op when the request has no pending
@@ -511,9 +556,7 @@ pub async fn load_personalities() -> Result<PersonalityRoster, String> {
 /// Persist the global personality roster atomically. Enforces builtin
 /// invariants and returns the normalized roster.
 #[tauri::command]
-pub async fn save_personalities(
-    roster: PersonalityRoster,
-) -> Result<PersonalityRoster, String> {
+pub async fn save_personalities(roster: PersonalityRoster) -> Result<PersonalityRoster, String> {
     crate::personalities::save_personalities(&roster).await
 }
 

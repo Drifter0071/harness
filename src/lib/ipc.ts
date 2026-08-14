@@ -323,6 +323,12 @@ export const ORCHESTRATOR_AGENT_ID = "orchestrator";
  *  the agent loop stamps on assistant messages. */
 export const ORCHESTRATOR_AGENT_NAME = "Orchestrator";
 
+/** Request-id prefix for dispatched subagent turns. Every subagent turn
+ *  runs under `sub-<uuid>`; the frontend routes `agent-*` events by this
+ *  prefix into the tiled subagent windows. Mirrors
+ *  `SUBAGENT_REQUEST_PREFIX` in `src-tauri/src/tools.rs`. */
+export const SUBAGENT_REQUEST_PREFIX = "sub-";
+
 /** Default system prompt for a subagent role, as seeded on first
  *  contact. Mirrors `AgentRole::default_prompt()` on the Rust side
  *  for the four subagent roles. The Orchestrator is NOT included —
@@ -379,8 +385,21 @@ export interface AgentTurnRequest {
 
 // Agent loop events (Rust → TS), routed by `requestId`.
 
+/** Identity + task of a dispatched subagent, attached to `agent-turn-start`
+ *  when the turn runs under a `sub-` request id. Lets the window manager
+ *  open a labeled tiled window without a registry round-trip. Mirrors
+ *  `SubagentStartInfo` in `src-tauri/src/agent_loop.rs`. */
+export interface SubagentStartInfo {
+  personalityId: string;
+  name: string;
+  role: AgentRole;
+  task: string;
+}
+
 export interface AgentTurnStart {
   requestId: string;
+  /** Present only when this turn is a dispatched subagent. */
+  subagent?: SubagentStartInfo;
 }
 
 export interface AgentChunk {
@@ -445,6 +464,42 @@ export type AgentErrorKind =
 export interface AgentError {
   requestId: string;
   kind: AgentErrorKind;
+  message: string;
+}
+
+// ── Subagent registry + inbox channel (tiling spec) ──
+
+/** Lifecycle status of a dispatched subagent turn. Mirrors
+ *  `SubagentStatus` in `src-tauri/src/agent.rs` (camelCase on the wire). */
+export type SubagentStatus = "working" | "done" | "cancelled" | "error";
+
+/** Registry entry for one dispatched subagent turn. Mirrors
+ *  `SubagentRecord` in `src-tauri/src/agent.rs`. The frontend mirrors
+ *  these into tiled windows; live content still streams via `agent-*`. */
+export interface SubagentRecord {
+  requestId: string;
+  /** Roster personality id the subagent ran as. */
+  personalityId: string;
+  /** Human-readable name (personality name, may be user-renamed). */
+  name: string;
+  role: AgentRole;
+  /** The delegation task text the orchestrator handed over. */
+  task: string;
+  status: SubagentStatus;
+  /** requestId of the orchestrator turn that dispatched this subagent. */
+  parentRequestId?: string;
+  startedAt: string;
+  finishedAt?: string;
+  /** Final answer text on success (capped to CONTENT_MAX on the Rust side). */
+  finalContent?: string;
+  /** Failure detail on error / cancellation. */
+  error?: string;
+}
+
+/** A message the Health Agent delivered to a subagent's inbox
+ *  (`subagent-message` event). */
+export interface SubagentMessage {
+  requestId: string;
   message: string;
 }
 
@@ -565,6 +620,11 @@ export const ipc = {
     invoke<void>("respond_approval", { requestId, allow }),
   cancelAgent: (requestId: string) =>
     invoke<void>("cancel_agent", { requestId }),
+
+  // Subagent registry (tiling spec). The frontend mirrors the records
+  // into tiled windows; live content still streams via the `agent-*`
+  // events keyed by the same `sub-<uuid>` request id.
+  listSubagents: () => invoke<SubagentRecord[]>("list_subagents"),
 };
 
 // ── Chat streaming events (Rust → TS) ──
@@ -605,4 +665,10 @@ export const agentEvents = {
     listen<AgentDone>("agent-done", (e) => fn(e.payload)),
   onError: (fn: (e: AgentError) => void) =>
     listen<AgentError>("agent-error", (e) => fn(e.payload)),
+  /** Health Agent → subagent inbox delivery. Routed by `requestId`
+   *  (the subagent's `sub-<uuid>`). The window manager shows the
+   *  incoming message in the subagent's chat without a registry
+   *  round-trip. */
+  onSubagentMessage: (fn: (e: SubagentMessage) => void) =>
+    listen<SubagentMessage>("subagent-message", (e) => fn(e.payload)),
 };

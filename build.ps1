@@ -33,11 +33,10 @@ Usage:
   .\build.ps1 -SkipInstall  skip npm install if node_modules exists
   .\build.ps1 -SkipRepair   never touch Cargo.toml
   .\build.ps1 -KeepInstallers  also produce MSI/NSIS installers
-  .\build.ps1 -Check        verify environment + Cargo.toml, then exit
-  .\build.ps1 -CleanAssetCache  clear tauri-codegen-assets cache (use after
-                                 toggling the tauri `compression` feature, or
-                                 if the asset cache served stale raw assets
-                                 from a prior build)
+  .\build.ps1 -Check           verify environment + Cargo.toml, then exit
+  .\build.ps1 -CleanAssetCache clear tauri-codegen-assets cache (use after toggling
+                                 the tauri `compression` feature, or if the asset
+                                 cache served stale raw assets from a prior build)
   .\build.ps1 -TargetMb 6   set a different size target
 #>
 [CmdletBinding()]
@@ -199,8 +198,8 @@ if ($Check) {
 # tauri-codegen caches compressed assets at OUT_DIR\tauri-codegen-assets and
 # only re-compresses when the content hash changes. If the `compression`
 # feature was toggled, the cache holds the old (raw) blobs and the next
-# cargo build won't refresh them. The moved cache dirs end up in $env:TEMP
-# (manual recovery if needed).
+# cargo build won't refresh them. The trashed files come back from the
+# Recycle Bin if needed.
 if ($CleanAssetCache) {
     Write-Step 'Cleaning tauri-codegen-assets cache'
     $dirs = Get-ChildItem (Join-Path $CargoDir 'target\release\build') -Directory -ErrorAction SilentlyContinue |
@@ -211,11 +210,12 @@ if ($CleanAssetCache) {
         foreach ($d in $dirs) {
             $count = (Get-ChildItem $d -File -ErrorAction SilentlyContinue).Count
             $size  = (Get-ChildItem $d -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-            Write-Info ("move to TEMP: {0}  ({1} files, {2:N2} MB)" -f $d, $count, ($size/1MB))
-            $stamped = Join-Path $env:TEMP ("harness-cache-{0}-{1}" -f [Guid]::NewGuid(), (Split-Path $d -Leaf))
+            Write-Info ("trash {0}  ({1} files, {2:N2} MB)" -f $d, $count, ($size/1MB))
+            $trashId = [Guid]::NewGuid().ToString()
+            $stamped = Join-Path $env:TEMP ("harness-cache-{0}-{1}" -f $trashId, (Split-Path $d -Leaf))
             Move-Item -LiteralPath $d -Destination $stamped -Force
         }
-        Write-Ok 'cache moved to $env:TEMP; restore from there if needed.'
+        Write-Ok 'cache moved to $env:TEMP; Recycle Bin / manual restore if needed'
     } else {
         Write-Info 'no asset cache to clean'
     }

@@ -12,8 +12,8 @@ import { capabilitiesFor } from "../lib/model-capabilities";
 import { chatErrorActions } from "../lib/chat-errors";
 import { showToast } from "../lib/toast";
 import { startAgentTurn, cancelAgentTurn, respondApproval, flushPendingSave } from "../lib/session-manager";
-import { Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench, Ban, AlertTriangle } from "lucide-react";
-import type { SessionMessage, Mention, ToolCallRecord } from "../lib/store";
+import { Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench, Ban, AlertTriangle, ListPlus, Pencil, Zap } from "lucide-react";
+import type { SessionMessage, Mention, ToolCallRecord, QueuedMessage } from "../lib/store";
 import type { ActionMode, ReasoningEffort } from "../lib/ipc";
 
 const nowIso = () => new Date().toISOString();
@@ -76,6 +76,7 @@ export function Chat() {
   const setGoalMode = useStore((s) => s.setGoalMode);
   const sessionLoaded = useStore((s) => s.sessionLoaded);
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const pendingMessages = useStore((s) => s.pendingMessages);
   const savedModels = useStore((s) => s.savedModels);
   const activeModelId = useStore((s) => s.activeModelId);
   const modelPrefs = useStore((s) => s.modelPrefs);
@@ -195,7 +196,14 @@ export function Chat() {
     const actions = chatErrorActions(err);
     st.setStreamingRequestId(null);
     st.setJobActivities([]);
-    if (actions.bubble === null) {
+    if (actions.bubble === undefined) {
+      // `cancelled`: keep the already-streamed segment in the chat.
+      // Only drop the optimistic bubble when nothing was generated.
+      const msg = st.messages.find((m) => m.id === err.requestId);
+      if (msg && (msg.content ?? "").length === 0) {
+        st.removeMessage(err.requestId);
+      }
+    } else if (actions.bubble === null) {
       st.removeMessage(err.requestId);
     } else {
       st.updateMessage(err.requestId, { content: actions.bubble, agentName: undefined });
@@ -221,8 +229,25 @@ export function Chat() {
 
   const handleSubmit = async (textOverride?: string, mentionsOverride?: Mention[]) => {
     const text = (textOverride ?? input).trim();
-    if (!text || isProcessing || streamingRequestId || agentRequestId) return;
+    if (!text || isProcessing) return;
     const mentions = mentionsOverride ?? extractMentions(text);
+
+    // A generation is in flight: the draft goes into the queue instead
+    // of being dropped. The auto-advance effect sends the head of the
+    // queue the moment the current stream/agent turn ends. Slash
+    // commands stay immediate-only — they can't run mid-stream anyway.
+    const st = useStore.getState();
+    if (st.streamingRequestId || st.agentRequestId) {
+      if (text.startsWith("/")) return;
+      st.enqueueMessage({
+        id: nanoid(),
+        content: text,
+        mentions: mentions.length > 0 ? mentions : undefined,
+      });
+      if (!textOverride) setInput("");
+      return;
+    }
+
     if (!textOverride) setInput("");
 
     // System commands stay on the old path (no LLM involved).
@@ -231,7 +256,6 @@ export function Chat() {
       return;
     }
 
-    const st = useStore.getState();
     const model = st.savedModels.find((m) => m.id === st.activeModelId) ?? null;
     if (!model) return;
 
@@ -317,6 +341,54 @@ export function Chat() {
     }
   };
 
+  // ── Queue auto-advance ──
+  // The moment a generation ends (done / error / cancelled), send the
+  // head of the pending-message queue so queued drafts flow without
+  // any extra click.
+  const prevBusyRef = useRef(false);
+  useEffect(() => {
+    const busy = streamingRequestId !== null || agentRequestId !== null;
+    if (prevBusyRef.current && !busy) {
+      const st = useStore.getState();
+      const next = st.pendingMessages[0];
+      if (next) {
+        st.removeQueuedMessage(next.id);
+        void handleSubmit(next.content, next.mentions);
+      }
+    }
+    prevBusyRef.current = busy;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamingRequestId, agentRequestId]);
+
+  /** Force-send: stop the in-flight generation and send `text` now.
+   *  The draft is pushed to the FRONT of the queue (ahead of anything
+   *  already waiting); the auto-advance effect picks it up the moment
+   *  the cancellation lands. Enqueuing before cancelling keeps the
+   *  ordering deterministic regardless of how the terminal event races
+   *  the cancel IPC. */
+  const handleForceSend = async (textOverride?: string, mentionsOverride?: Mention[]) => {
+    const text = (textOverride ?? input).trim();
+    if (!text) return;
+    const mentions = mentionsOverride ?? extractMentions(text);
+    const st = useStore.getState();
+    const busy = st.streamingRequestId !== null || st.agentRequestId !== null;
+    if (!busy) {
+      // Nothing to interrupt — behaves like a normal send.
+      await handleSubmit(textOverride, mentionsOverride);
+      return;
+    }
+    st.enqueueMessage(
+      {
+        id: nanoid(),
+        content: text,
+        mentions: mentions.length > 0 ? mentions : undefined,
+      },
+      true
+    );
+    if (!textOverride) setInput("");
+    await handleCancel();
+  };
+
   const handleCommand = async (cmd: string) => {
     const parts = cmd.split(/\s+/);
     const command = parts[0].toLowerCase();
@@ -397,8 +469,8 @@ export function Chat() {
   const placeholder =
     composerState === "streaming"
       ? agentRequestId
-        ? "Agent working..."
-        : "Streaming..."
+        ? "Agent working… type to queue a message"
+        : "Streaming… type to queue a message"
       : composerState === "noActive"
         ? "Add a model in Settings to start"
         : composerState === "noKey" || composerState === "auth"
@@ -560,6 +632,25 @@ export function Chat() {
             </div>
           )}
 
+          {/* Pending message queue: drafts wait here while a generation
+              runs. The head auto-sends when the current response ends. */}
+          {pendingMessages.length > 0 && (
+            <div className="mb-2">
+              <div className="flex items-center gap-1.5 mb-1.5 text-[11px] text-white-30 select-none">
+                <ListPlus size={12} className="shrink-0" />
+                <span>
+                  Queued ({pendingMessages.length}) — sent in order when the
+                  current response ends
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                {pendingMessages.map((qm) => (
+                  <QueuedMessageItem key={qm.id} item={qm} />
+                ))}
+              </div>
+            </div>
+          )}
+
           <div
             className="glass-mist glass-mist--composer relative flex items-center"
             onClick={handleComposerClick}
@@ -573,13 +664,35 @@ export function Chat() {
               placeholder={placeholder}
             />
             {composerState === "streaming" ? (
-              <button
-                onClick={handleCancel}
-                className="glass-quartz glass-quartz--pill shrink-0 m-1.5 px-3.5 py-3 text-white"
-                title="Stop"
-              >
-                <Square size={14} fill="currentColor" />
-              </button>
+              <div className="flex items-center shrink-0 m-1.5 gap-1">
+                {input.trim() && (
+                  <>
+                    <button
+                      onClick={() => void handleSubmit()}
+                      className="glass-quartz glass-quartz--pill px-3 py-3 text-white"
+                      title="Queue message — auto-sent when the current response finishes"
+                      aria-label="Queue message"
+                    >
+                      <ListPlus size={15} />
+                    </button>
+                    <button
+                      onClick={() => void handleForceSend()}
+                      className="glass-quartz glass-quartz--pill px-3 py-3 text-white"
+                      title="Stop the current response and send this now"
+                      aria-label="Send now, stopping the current response"
+                    >
+                      <Zap size={14} />
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={handleCancel}
+                  className="glass-quartz glass-quartz--pill px-3.5 py-3 text-white"
+                  title="Stop — keeps the partial response"
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              </div>
             ) : composerState === "unreachable" ? (
               <button
                 onClick={(e) => {
@@ -760,6 +873,96 @@ function ToolCallBlock({ call }: { call: ToolCallRecord }) {
           {call.summary}
         </div>
       )}
+    </div>
+  );
+}
+
+/** One queued draft chip: truncated preview, inline edit, discard.
+ *  Editing happens in place so the composer stays free to draft the
+ *  next message while earlier ones wait in line. */
+function QueuedMessageItem({ item }: { item: QueuedMessage }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.content);
+
+  const commit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    const mentions = extractMentions(text);
+    useStore.getState().updateQueuedMessage(item.id, {
+      content: text,
+      mentions: mentions.length > 0 ? mentions : undefined,
+    });
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2 bg-surface-2 border border-border-strong rounded px-2.5 py-1.5 animate-fade-in">
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              setDraft(item.content);
+              setEditing(false);
+            }
+          }}
+          className="flex-1 min-w-0 bg-transparent text-[12px] text-white outline-none"
+          placeholder="Message…"
+          aria-label="Edit queued message"
+        />
+        <button
+          onClick={commit}
+          disabled={!draft.trim()}
+          className="text-white-50 hover:text-status-active disabled:opacity-40 transition-colors shrink-0"
+          title="Save"
+          aria-label="Save queued message"
+        >
+          <Check size={13} />
+        </button>
+        <button
+          onClick={() => {
+            setDraft(item.content);
+            setEditing(false);
+          }}
+          className="text-white-30 hover:text-white transition-colors shrink-0"
+          title="Cancel edit"
+          aria-label="Cancel edit"
+        >
+          <X size={13} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 bg-surface-2 border border-border-subtle rounded px-2.5 py-1.5 animate-fade-in">
+      <span className="flex-1 min-w-0 text-[12px] text-white-50 truncate" title={item.content}>
+        {item.content}
+      </span>
+      <button
+        onClick={() => {
+          setDraft(item.content);
+          setEditing(true);
+        }}
+        className="text-white-30 hover:text-white transition-colors shrink-0"
+        title="Edit queued message"
+        aria-label="Edit queued message"
+      >
+        <Pencil size={12} />
+      </button>
+      <button
+        onClick={() => useStore.getState().removeQueuedMessage(item.id)}
+        className="text-white-30 hover:text-status-error transition-colors shrink-0"
+        title="Discard queued message"
+        aria-label="Discard queued message"
+      >
+        <X size={13} />
+      </button>
     </div>
   );
 }
