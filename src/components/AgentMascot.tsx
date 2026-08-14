@@ -1,163 +1,423 @@
 // Bip — the harness agent mascot.
 //
-// A chibi robot HEAD: the angular helmet, side fins and mouth grille
-// of a Transformer, mixed with the Eva Unit-01 signature (bright
-// violet + neon lime, the horn, the nose-crest visor) — all rounded
-// and cartoon-cute. The SVG body is static per mood; every bit of
-// motion is CSS-driven (see the "Bip" section of index.css) so it
-// stays cheap and honours prefers-reduced-motion.
+// A chibi robot HEAD: the angular helmet, side fins and signature
+// horn of an Eva Unit-01 / Transformer cross, all rounded and
+// cartoon-cute. The SVG is a *persistent* element tree — eyes, mouth
+// and horn tip are single paths that GSAP morphs between expression
+// shapes so mood transitions feel like a single character changing
+// expression, not a costume swap. The body color and accent hue
+// also shift with mood (sky / lilac / sun / coral) so the whole
+// character "re-tints" rather than just the eyes.
 //
-// This is the one sanctioned non-Lucide illustration in the app — it
-// is a *character*, not an icon, so it deliberately breaks the
+// Motion vocabulary (see `index.css` for the long-form):
+//   • breath           — single 3.6s source-of-truth cycle everything locks to
+//   • bob / bob-fast   — body float, idle vs working
+//   • celebrate        — one-shot anticipation→launch→land→settle
+//   • shake            — small tremble for error
+//   • fin / horn / core — secondary motion on the head & chest
+//   • blink            — eye scaleY pulse
+//   • sparkle bits     — fade in → orbit → fade out, staggered
+//   • entrance         — first-mount only, 480ms reveal
+//
+// Honors `prefers-reduced-motion` via the `bip-reduced` class on the
+// root SVG, set at construction time — when set, GSAP skips and the
+// eyes fall back to the neutral open shape with a static mid-glow.
+//
+// This is the one sanctioned non-Lucide illustration in the app —
+// it is a *character*, not an icon, so it deliberately breaks the
 // "Lucide icons only" rule. Standard UI icons stay Lucide.
 //
 // Exports:
 //   AgentMascot  — the full mascot. `mood` picks the expression:
-//                  idle (dozing) · working (big alert eyes + orbiting
-//                  data bits) · success (happy arcs) · error (X eyes).
+//                  idle · working · success · error.
 //   ConfettiBurst— the success confetti, absolutely positioned over
 //                  the mascot's wrapper (wrapper must be `relative`).
 //   TypingBuddy  — the tiny Bip used in place of a plain blinking
 //                  cursor: it "types" text into the stream, or
 //                  sweeps it up while the agent stream-deletes.
 
-import { useId, type CSSProperties } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  type CSSProperties,
+} from "react";
+import { gsap } from "gsap";
+import { MorphSVGPlugin } from "gsap/MorphSVGPlugin";
+
+gsap.registerPlugin(MorphSVGPlugin);
 
 export type MascotMood = "idle" | "working" | "success" | "error";
 export type BuddyMode = "typing" | "sweeping";
 
-/** Eva Unit-01 palette — bright cartoon violet body, neon lime accents. */
-const EVA = {
-  bodyTop: "#9d6bff", // bright violet
-  bodyBottom: "#7c3aed", // violet-600 — shading, still vivid
-  plate: "#8b5cf6", // fins / collar
-  plateDark: "#6d28d9", // brow / recesses
-  visor: "#0b0b16", // deep faceplate for contrast
-  bone: "#ffffff", // horn
-  idle: "#9de96e", // soft lime — dozing
-  working: "#a3e635", // neon lime — alert
-  success: "#ffc94d", // sun — celebration
-  error: "#ff6b5e", // coral — hmm
-};
+/* ──────────────────────────────────────────────────────────────────
+ * Mood palette — sky / lilac / sun / coral, lifted from the app's
+ * own accent palette so Bip belongs to the same world as the rest
+ * of the chrome. The body *tints* to the mood's color, the accent
+ * (horn tip, eye, chest core) keeps a complementary punch.
+ * ────────────────────────────────────────────────────────────────── */
+const MOOD = {
+  idle: {
+    body: ["#5bc9ff", "#2b8fc7"],     // sky → deeper sky
+    plate: "#3aa3d6",
+    plateDark: "#1f6f9a",
+    accent: "#b28dff",                 // lilac — calm twinkle
+    halo: "rgba(91, 201, 255, 0.30)",  // sky
+  },
+  working: {
+    body: ["#b28dff", "#7c3aed"],     // lilac → violet
+    plate: "#8b5cf6",
+    plateDark: "#6d28d9",
+    accent: "#54e3a8",                 // mint — focused spark
+    halo: "rgba(178, 141, 255, 0.32)", // lilac
+  },
+  success: {
+    body: ["#ffc94d", "#e0a02a"],     // sun → amber
+    plate: "#f0b73a",
+    plateDark: "#b87a17",
+    accent: "#54e3a8",                 // mint — celebration pop
+    halo: "rgba(255, 201, 77, 0.34)",  // sun
+  },
+  error: {
+    body: ["#ff6b5e", "#c93f33"],     // coral → red
+    plate: "#d44b40",
+    plateDark: "#8c2620",
+    accent: "#b28dff",                 // lilac — softens the red
+    halo: "rgba(239, 68, 68, 0.30)",   // red
+  },
+} as const;
 
-/** Accent hue per mood (horn tip, visor crest, eyes). */
-const HUE: Record<MascotMood, string> = {
-  idle: EVA.idle,
-  working: EVA.working,
-  success: EVA.success,
-  error: EVA.error,
-};
+const BONE = "#ffffff";
+const VISOR = "#0b0b16";
 
 const CONFETTI_COLORS = ["#a3e635", "#8b5cf6", "#ffc94d", "#b28dff", "#54e3a8"];
 
+/* ──────────────────────────────────────────────────────────────────
+ * Expression paths — every eye and the mouth are authored so they
+ * share the same command structure and point count, which is what
+ * GSAP MorphSVG needs to interpolate cleanly between them.
+ *
+ * Coordinate space: a 96×96 viewBox centered on the face.
+ *   Left eye center  ~ (38, 51)
+ *   Right eye center ~ (58, 51)
+ *   Mouth center     ~ (48, 68)
+ *
+ * The face is the priority: visor takes ~54% of head height, eyes
+ * are ~14×14, mouth is ~22px wide — the character reads as
+ * expressive at small (24px) sizes too.
+ * ────────────────────────────────────────────────────────────────── */
+const EYE_OPEN = {
+  left:  "M31 51 Q38 42 45 51 Q38 60 31 51 Z",
+  right: "M51 51 Q58 42 65 51 Q58 60 51 51 Z",
+};
+const EYE_HALF = {
+  left:  "M32 51 Q38 47 44 51 Q38 55 32 51 Z",
+  right: "M52 51 Q58 47 64 51 Q58 55 52 51 Z",
+};
+const EYE_CLOSED = {
+  left:  "M32 51 Q38 50 44 51",
+  right: "M52 51 Q58 50 64 51",
+};
+const EYE_HAPPY = {
+  left:  "M30 53 Q38 44 46 53",
+  right: "M50 53 Q58 44 66 53",
+};
+const EYE_X = {
+  left:  "M32 46 L44 56 M44 46 L32 56",
+  right: "M52 46 L64 56 M64 46 L52 56",
+};
+const EYE_O = {
+  left:  "M38 51 m-4 0 a4 4 0 1 0 8 0 a4 4 0 1 0 -8 0",
+  right: "M58 51 m-4 0 a4 4 0 1 0 8 0 a4 4 0 1 0 -8 0",
+};
+
+/* Mouth — single path, four personalities. Wider + more vertical
+ * range so the smile reads as an actual smile at small sizes. */
+const MOUTH_GRIN    = "M37 67 Q48 76 59 67";           // celebration smile
+const MOUTH_FLAT    = "M37 68 L59 68";                 // neutral, surprised-flat
+const MOUTH_O       = "M48 68 m-3.2 0 a3.2 2.4 0 1 0 6.4 0 a3.2 2.4 0 1 0 -6.4 0"; // "o" surprise
+const MOUTH_FROWN   = "M37 71 Q48 65 59 71";           // downturn for error
+const MOUTH_NEUTRAL = "M40 68 L56 68";                 // resting / idle
+
+/* Pick the right expression for a mood. Eyes and mouth can be tuned
+ * independently per mood — e.g. "working" is wide-open eyes with a
+ * small flat mouth, "success" is happy arcs with a big smile. */
+const EXPRESSION_FOR: Record<MascotMood, { eyes: { left: string; right: string }; mouth: string }> = {
+  idle:    { eyes: EYE_HALF,   mouth: MOUTH_NEUTRAL },
+  working: { eyes: EYE_OPEN,   mouth: MOUTH_FLAT },
+  success: { eyes: EYE_HAPPY,  mouth: MOUTH_GRIN },
+  error:   { eyes: EYE_X,      mouth: MOUTH_FROWN },
+};
+
+/* A "swept" expression for the buddy when it's stream-deleting —
+ * squinty eyes, a slightly-open mouth. */
+const SWEEP_EXPRESSION = { eyes: EYE_HALF, mouth: MOUTH_O };
+
+const REDUCED = typeof window !== "undefined"
+  && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+/* ──────────────────────────────────────────────────────────────────
+ * AgentMascot — the main character.
+ * ────────────────────────────────────────────────────────────────── */
 export function AgentMascot({
   mood,
   size = 30,
   className,
+  firstMount = false,
 }: {
   mood: MascotMood;
   size?: number;
   className?: string;
+  /** Set true on the very first render of this mascot instance —
+   *  triggers the 480ms entrance reveal. Subsequent re-renders
+   *  (mood changes, prop changes) skip the entrance. */
+  firstMount?: boolean;
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
-  const hue = HUE[mood];
-  const blinkable = mood === "idle" || mood === "working";
+  const m = MOOD[mood];
+
+  // Refs to the parts GSAP will tween
+  const rootRef   = useRef<SVGSVGElement>(null);
+  const leftEye   = useRef<SVGPathElement>(null);
+  const rightEye  = useRef<SVGPathElement>(null);
+  const mouth     = useRef<SVGPathElement>(null);
+  const bodyRef   = useRef<SVGRectElement>(null);
+  const bodyGrad  = useRef<SVGLinearGradientElement>(null);
+  const plateRef  = useRef<SVGRectElement>(null);
+  const plateDarkRef = useRef<SVGRectElement>(null);
+  const hornTip   = useRef<SVGCircleElement>(null);
+  const chestCore = useRef<SVVCircleElement | null>(null);
+
+  // Keep latest values in a ref so the morph effect doesn't re-bind
+  const stateRef = useRef({ mood });
+  stateRef.current.mood = mood;
+
+  /* GSAP morph on mood change. Single timeline per change keeps the
+   * eyes + mouth in sync and lets us share the same easing. */
+  useLayoutEffect(() => {
+    if (REDUCED) return;
+    if (!leftEye.current || !rightEye.current || !mouth.current) return;
+    const target = EXPRESSION_FOR[mood];
+    const tl = gsap.timeline({ defaults: { duration: 0.32, ease: "power2.out" } });
+    tl.to(leftEye.current,  { morphSVG: target.eyes.left,  attr: { fill: target.eyes === EYE_HAPPY || target.eyes === EYE_X ? "none" : m.accent } }, 0)
+      .to(rightEye.current, { morphSVG: target.eyes.right, attr: { fill: target.eyes === EYE_HAPPY || target.eyes === EYE_X ? "none" : m.accent } }, 0)
+      .to(mouth.current,    { morphSVG: target.mouth, attr: { stroke: m.accent } }, 0);
+    return () => { tl.kill(); };
+  }, [mood, m.accent]);
+
+  /* Body color tween on mood change — animates the two gradient stops
+   * so the whole head re-tints rather than just the accents. */
+  useLayoutEffect(() => {
+    if (REDUCED) return;
+    if (!bodyGrad.current) return;
+    const stops = bodyGrad.current.querySelectorAll("stop");
+    if (stops.length < 2) return;
+    const tl = gsap.timeline({ defaults: { duration: 0.45, ease: "power2.inOut" } });
+    tl.to(stops[0], { stopColor: m.body[0] }, 0)
+      .to(stops[1], { stopColor: m.body[1] }, 0)
+      .to(plateRef.current,    { fill: m.plate }, 0)
+      .to(plateDarkRef.current, { fill: m.plateDark }, 0)
+      .to(hornTip.current,     { fill: m.accent }, 0)
+      .to(chestCore.current,    { fill: m.accent }, 0);
+    return () => { tl.kill(); };
+  }, [mood, m.body, m.plate, m.plateDark, m.accent]);
+
+  /* One-shot entrance on first mount. Just a soft fade + lift;
+   * no horn-tip elastic pop (user feedback: no blinking lights). */
+  useEffect(() => {
+    if (!firstMount || REDUCED || !rootRef.current) return;
+    const el = rootRef.current;
+    gsap.fromTo(
+      el,
+      { opacity: 0, y: 6 },
+      { opacity: 1, y: 0, duration: 0.42, ease: "power2.out" }
+    );
+  }, [firstMount]);
 
   return (
     <svg
+      ref={rootRef}
       width={size}
       height={size}
       viewBox="0 0 96 96"
       className={className}
+      data-mood={mood}
+      data-bip="agent"
       aria-hidden="true"
     >
       <defs>
-        <linearGradient id={`bip-body-${uid}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={EVA.bodyTop} />
-          <stop offset="100%" stopColor={EVA.bodyBottom} />
+        <linearGradient
+          ref={bodyGrad}
+          id={`bip-body-${uid}`}
+          x1="0"
+          y1="0"
+          x2="0"
+          y2="1"
+        >
+          <stop offset="0%" stopColor={m.body[0]} />
+          <stop offset="100%" stopColor={m.body[1]} />
         </linearGradient>
+        <radialGradient id={`bip-cheek-${uid}`} cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor={m.accent} stopOpacity="0.55" />
+          <stop offset="100%" stopColor={m.accent} stopOpacity="0" />
+        </radialGradient>
       </defs>
 
-      {/* Head fins — the angular Transformer "ears", neon lime outer edge */}
-      <path d="M23 33 L8 39 L11 57 L24 49 Z" fill={EVA.plate} />
-      <path d="M8 39 L11 57" stroke={hue} strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.9" />
-      <path d="M73 33 L88 39 L85 57 L72 49 Z" fill={EVA.plate} />
-      <path d="M88 39 L85 57" stroke={hue} strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.9" />
+      {/* Head fins — gentle float, neon-lime outer edge */}
+      <g className="bip-fin bip-fin--left">
+        <path d="M22 32 L6 38 L10 58 L24 50 Z" fill={m.plate} />
+        <path d="M6 38 L10 58" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
+      </g>
+      <g className="bip-fin bip-fin--right">
+        <path d="M74 32 L90 38 L86 58 L72 50 Z" fill={m.plate} />
+        <path d="M90 38 L86 58" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
+      </g>
 
-      {/* The horn — Eva Unit-01 signature, white bone, glowing lime tip */}
-      <path d="M48 24 C 47 17, 45 12, 41.5 8 C 47 10, 50 15, 51 23 Z" fill={EVA.bone} />
-      <circle cx="41.5" cy="8" r="2.6" fill={hue} className="mascot-glow" />
+      {/* The horn — Eva signature, white bone, glowing tip */}
+      <path d="M48 24 C 47 17, 45 12, 41.5 8 C 47 10, 50 15, 51 23 Z" fill={BONE} />
+      <circle ref={hornTip} cx="41.5" cy="8" r="2.6" fill={m.accent} />
 
-      {/* Head — big rounded helmet */}
-      <rect x="17" y="23" width="62" height="50" rx="20" fill={`url(#bip-body-${uid})`} />
+      {/* Head — big rounded helmet. CSS does the breath scale. */}
+      <rect
+        ref={bodyRef}
+        className="bip-body"
+        x="10"
+        y="22"
+        width="76"
+        height="60"
+        rx="24"
+        fill={`url(#bip-body-${uid})`}
+      />
 
-      {/* Brow plate — layered Transformer helmet ridge */}
-      <rect x="25" y="33" width="46" height="7" rx="3.5" fill={EVA.plateDark} />
+      {/* Brow plate — subtle alert ridge lift when working */}
+      <rect
+        ref={plateDarkRef}
+        className="bip-brow"
+        x="18"
+        y="32"
+        width="60"
+        height="8"
+        rx="4"
+        fill={m.plateDark}
+      />
 
-      {/* Visor — rounded Eva faceplate */}
-      <rect x="30" y="40" width="36" height="18" rx="9" fill={EVA.visor} />
-      {/* The Unit-01 nose crest line */}
-      <rect x="47.2" y="40" width="1.8" height="17" fill={hue} opacity="0.9" />
+      {/* Visor — generously sized. Eyes + mouth sit inside it. */}
+      <rect x="14" y="40" width="68" height="32" rx="14" fill={VISOR} />
+      {/* The Unit-01 nose crest line — draws on when working */}
+      <line
+        className="bip-nose-crest"
+        x1="48"
+        y1="40"
+        x2="48"
+        y2="72"
+        stroke={m.accent}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        opacity="0.9"
+      />
 
-      {/* Eyes — big cartoon eyes in the visor */}
-      <g className={blinkable ? "mascot-eyes" : undefined}>
-        {mood === "success" ? (
-          // Happy arcs
+      {/* Cheek dots — Eva-01 signature, sit on the visor edge */}
+      <circle cx="22" cy="68" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--left" />
+      <circle cx="74" cy="68" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--right" />
+
+      {/* Eyes — single path per side, GSAP morphs between expressions */}
+      <g className="bip-eyes">
+        <path
+          ref={leftEye}
+          className="bip-eye bip-eye--left"
+          d={EXPRESSION_FOR[mood].eyes.left}
+          fill={EXPRESSION_FOR[mood].eyes === EYE_HAPPY || EXPRESSION_FOR[mood].eyes === EYE_X ? "none" : m.accent}
+          stroke={m.accent}
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          ref={rightEye}
+          className="bip-eye bip-eye--right"
+          d={EXPRESSION_FOR[mood].eyes.right}
+          fill={EXPRESSION_FOR[mood].eyes === EYE_HAPPY || EXPRESSION_FOR[mood].eyes === EYE_X ? "none" : m.accent}
+          stroke={m.accent}
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {/* Glossy catch-lights, only meaningful when eyes are open */}
+        {EXPRESSION_FOR[mood].eyes === EYE_OPEN && (
           <>
-            <path d="M37 50 Q41 54.5 45 50" stroke={hue} strokeWidth="2.6" strokeLinecap="round" fill="none" />
-            <path d="M51 50 Q55 54.5 59 50" stroke={hue} strokeWidth="2.6" strokeLinecap="round" fill="none" />
-          </>
-        ) : mood === "error" ? (
-          // X eyes
-          <>
-            <path d="M37.5 46.5 L44.5 52.5 M44.5 46.5 L37.5 52.5" stroke={hue} strokeWidth="2.4" strokeLinecap="round" />
-            <path d="M51.5 46.5 L58.5 52.5 M58.5 46.5 L51.5 52.5" stroke={hue} strokeWidth="2.4" strokeLinecap="round" />
-          </>
-        ) : mood === "working" ? (
-          // Wide-open glossy eyes — alert
-          <>
-            <circle cx="41" cy="49" r="4.6" fill={hue} />
-            <circle cx="55" cy="49" r="4.6" fill={hue} />
-            <circle cx="39.6" cy="47.4" r="1.5" fill={EVA.visor} />
-            <circle cx="53.6" cy="47.4" r="1.5" fill={EVA.visor} />
-          </>
-        ) : (
-          // Idle — dozing closed lids
-          <>
-            <path d="M37 49 Q41 45 45 49" stroke={hue} strokeWidth="2.4" strokeLinecap="round" fill="none" opacity="0.8" />
-            <path d="M51 49 Q55 45 59 49" stroke={hue} strokeWidth="2.4" strokeLinecap="round" fill="none" opacity="0.8" />
+            <circle className="bip-catchlight bip-catchlight--left" cx="35" cy="47" r="1.6" fill={VISOR} />
+            <circle className="bip-catchlight bip-catchlight--right" cx="55" cy="47" r="1.6" fill={VISOR} />
           </>
         )}
       </g>
 
-      {/* Mouth grille — tiny Transformer vent */}
-      <g opacity="0.85">
-        <rect x="42.5" y="61" width="2" height="5" rx="1" fill={hue} />
-        <rect x="47" y="61" width="2" height="5" rx="1" fill={hue} />
-        <rect x="51.5" y="61" width="2" height="5" rx="1" fill={hue} />
-      </g>
+      {/* Mouth — single path, GSAP morphs between expressions */}
+      <path
+        ref={mouth}
+        className="bip-mouth"
+        d={EXPRESSION_FOR[mood].mouth}
+        stroke={m.accent}
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+        opacity="0.95"
+      />
 
-      {/* Chest collar — small pauldron nubs + glowing core */}
-      <path d="M20 74 L12 80 L14 90 L24 85 Z" fill={EVA.plate} />
-      <path d="M12 80 L14 90" stroke={hue} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
-      <path d="M76 74 L84 80 L82 90 L72 85 Z" fill={EVA.plate} />
-      <path d="M84 80 L82 90" stroke={hue} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
-      <circle cx="48" cy="83" r="3.6" fill={hue} className="mascot-glow" />
+      {/* Chest collar — small pauldron nubs, static core dot (no pulse) */}
+      <path d="M22 80 L14 86 L16 96 L26 91 Z" fill={m.plate} />
+      <path d="M14 86 L16 96" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
+      <path d="M74 80 L82 86 L80 96 L70 91 Z" fill={m.plate} />
+      <path d="M82 86 L80 96" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
+      <circle
+        ref={(el) => { chestCore.current = el; }}
+        cx="48"
+        cy="89"
+        r="3.6"
+        fill={m.accent}
+      />
 
-      {/* Working — orbiting data bits */}
+      {/* Sparkle orbit — only in working mood. The whole frame rotates
+          slowly (7.2s = two breath cycles), and each individual bit
+          pulses on its own period so the field looks alive instead of
+          rigid. Each bit carries the mood's accent color so the
+          sparkles harmonize with the body tint. */}
       {mood === "working" && (
-        <g className="mascot-orbit">
-          <circle cx="14" cy="26" r="3.2" fill={EVA.working} />
-          <circle cx="82" cy="44" r="3.2" fill="#ffc94d" />
-          <circle cx="20" cy="68" r="3.2" fill="#b28dff" />
+        <g className="bip-orbit-frame">
+          <circle
+            className="bip-sparkle bip-sparkle--1"
+            cx="6"  cy="48" r="2.6"
+            fill={m.accent}
+          />
+          <circle
+            className="bip-sparkle bip-sparkle--2"
+            cx="90" cy="32" r="2.2"
+            fill="#ffc94d"
+          />
+          <circle
+            className="bip-sparkle bip-sparkle--3"
+            cx="90" cy="64" r="2.4"
+            fill="#54e3a8"
+          />
+          <circle
+            className="bip-sparkle bip-sparkle--4"
+            cx="6"  cy="32" r="2.0"
+            fill="#5bc9ff"
+          />
         </g>
       )}
     </svg>
   );
 }
 
-/** Success confetti — absolutely positioned over the mascot's
- *  `relative` wrapper; pieces fly outward from the mascot's center. */
+/* A tiny shape used for the SVGRectElement ref typing above */
+type SVVCircleElement = SVGCircleElement;
+
+/* ──────────────────────────────────────────────────────────────────
+ * ConfettiBurst — success confetti (unchanged shape, CSS handles
+ * the gravity arc in index.css).
+ * ────────────────────────────────────────────────────────────────── */
 export function ConfettiBurst() {
   const pieces = [
     { tx: -18, ty: -24, rot: 200, color: CONFETTI_COLORS[0], delay: 0 },
@@ -179,7 +439,6 @@ export function ConfettiBurst() {
           className="confetti-piece"
           style={{
             background: p.color,
-            // Cast: CSS custom props are untyped by design.
             ...({ "--tx": `${p.tx}px`, "--ty": `${p.ty}px`, "--rot": `${p.rot}deg` } as CSSProperties),
             animationDelay: `${p.delay}s`,
           }}
@@ -189,9 +448,10 @@ export function ConfettiBurst() {
   );
 }
 
-/** The tiny Bip that stands in for a plain blinking cursor.
- *  `typing` — bouncing while text streams in.
- *  `sweeping` — brandishes a tiny broom while the agent stream-deletes. */
+/* ──────────────────────────────────────────────────────────────────
+ * TypingBuddy — the tiny Bip that "types" text into the stream,
+ * or sweeps it up while the agent stream-deletes.
+ * ────────────────────────────────────────────────────────────────── */
 export function TypingBuddy({
   mode = "typing",
   size = 16,
@@ -202,69 +462,70 @@ export function TypingBuddy({
   className?: string;
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
+  const m = MOOD[mode === "sweeping" ? "working" : "working"];
+  const sweep = mode === "sweeping";
   return (
     <span
       className={`inline-flex items-center justify-center ${mode === "typing" ? "mascot-typing" : "mascot-sweep"} ${className ?? ""}`}
       aria-hidden="true"
       title={mode === "typing" ? "typing…" : "sweeping…"}
     >
-      <svg width={size} height={size} viewBox="0 0 64 64">
+      <svg width={size} height={size} viewBox="0 0 64 64" data-bip="buddy">
         <defs>
           <linearGradient id={`bip-buddy-${uid}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={EVA.bodyTop} />
-            <stop offset="100%" stopColor={EVA.bodyBottom} />
+            <stop offset="0%" stopColor={m.body[0]} />
+            <stop offset="100%" stopColor={m.body[1]} />
           </linearGradient>
         </defs>
 
         {/* Horn */}
-        <path d="M32 17 L30.5 11 L33.5 11.5 Z" fill={EVA.bone} />
-        <circle cx="30.8" cy="11.2" r="1.5" fill={EVA.working} className="mascot-glow" />
+        <path d="M32 17 L30.5 11 L33.5 11.5 Z" fill={BONE} />
+        <circle cx="30.8" cy="11.2" r="1.5" fill={m.accent} className="mascot-glow" />
 
-        {/* Head — rounded helmet */}
+        {/* Head */}
         <rect x="17" y="16" width="30" height="28" rx="11" fill={`url(#bip-buddy-${uid})`} />
 
         {/* Brow plate */}
-        <rect x="20" y="20" width="24" height="4" rx="2" fill={EVA.plateDark} />
+        <rect x="20" y="20" width="24" height="4" rx="2" fill={m.plateDark} />
 
         {/* Visor */}
-        <rect x="21" y="24" width="22" height="11" rx="5.5" fill={EVA.visor} />
-        <rect x="31.4" y="24" width="1.2" height="10" fill={EVA.working} opacity="0.9" />
+        <rect x="21" y="24" width="22" height="11" rx="5.5" fill={VISOR} />
+        <rect x="31.4" y="24" width="1.2" height="10" fill={m.accent} opacity="0.9" />
 
-        {/* Eyes */}
-        {mode === "sweeping" ? (
-          // Squint — focused on the mess
+        {/* Eyes — small inline versions; not GSAP-morphed because the
+            buddy is a passive icon, not a performative character. */}
+        {sweep ? (
           <>
-            <path d="M25 30.5 Q26.5 28.8 28 30.5" stroke={EVA.working} strokeWidth="1.6" strokeLinecap="round" fill="none" />
-            <path d="M36 30.5 Q37.5 28.8 39 30.5" stroke={EVA.working} strokeWidth="1.6" strokeLinecap="round" fill="none" />
+            <path d="M25 30.5 Q26.5 28.8 28 30.5" stroke={m.accent} strokeWidth="1.6" strokeLinecap="round" fill="none" />
+            <path d="M36 30.5 Q37.5 28.8 39 30.5" stroke={m.accent} strokeWidth="1.6" strokeLinecap="round" fill="none" />
           </>
         ) : (
-          // Bright round eyes with glossy highlights
           <>
-            <circle cx="26.8" cy="29.5" r="1.9" fill={EVA.working} />
-            <circle cx="37.2" cy="29.5" r="1.9" fill={EVA.working} />
-            <circle cx="26.2" cy="29" r="0.6" fill={EVA.visor} />
-            <circle cx="36.6" cy="29" r="0.6" fill={EVA.visor} />
+            <circle cx="26.8" cy="29.5" r="1.9" fill={m.accent} />
+            <circle cx="37.2" cy="29.5" r="1.9" fill={m.accent} />
+            <circle cx="26.2" cy="29" r="0.6" fill={VISOR} />
+            <circle cx="36.6" cy="29" r="0.6" fill={VISOR} />
           </>
         )}
 
-        {/* Mouth grille */}
-        <g opacity="0.85">
-          <rect x="29" y="37.5" width="1.2" height="3" rx="0.6" fill={EVA.working} />
-          <rect x="31.4" y="37.5" width="1.2" height="3" rx="0.6" fill={EVA.working} />
-          <rect x="33.8" y="37.5" width="1.2" height="3" rx="0.6" fill={EVA.working} />
-        </g>
+        {/* Mouth — neutral smile for both modes */}
+        <path
+          d={mode === "sweeping" ? MOUTH_O : MOUTH_GRIN}
+          stroke={m.accent}
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          fill="none"
+        />
 
         {/* Chest core */}
-        <circle cx="32" cy="43" r="1.8" fill={EVA.working} className="mascot-glow" />
+        <circle cx="32" cy="43" r="1.8" fill={m.accent} className="mascot-glow" />
 
-        {mode === "sweeping" && (
+        {sweep && (
           <>
-            {/* Broom — handle + head, wiggling */}
             <g className="broom-wiggle">
               <line x1="38" y1="52" x2="48" y2="41" stroke="#d7d7de" strokeWidth="2" strokeLinecap="round" />
               <path d="M46 39 L52 33 L56 37 L50 43 Z" fill="#ff6b5e" />
             </g>
-            {/* Dust specks flying off the swept text */}
             <circle className="sweep-dust" cx="26" cy="44" r="1.2" fill="#ffc94d" style={{ "--dx": "-5px", "--dy": "-4px" } as CSSProperties} />
             <circle className="sweep-dust" cx="22" cy="38" r="1" fill="#5bc9ff" style={{ "--dx": "-6px", "--dy": "-3px", animationDelay: "0.25s" } as CSSProperties} />
             <circle className="sweep-dust" cx="29" cy="50" r="1" fill="#b28dff" style={{ "--dx": "-7px", "--dy": "2px", animationDelay: "0.12s" } as CSSProperties} />

@@ -54,12 +54,10 @@ function App() {
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-0 overflow-hidden relative">
       <TitleBar />
-      {/* Top zone: pill row (row 1) + stats row (row 2) share the same
-          3-column tracks (1fr / auto / 1fr). The center column auto-sizes
-          to fit Bip and the stats row, so the stats line is visually
-          anchored directly under Bip and never drifts to one side. */}
-      <div className="px-3 grid grid-cols-[1fr_auto_1fr] gap-2 items-start">
-        <ActiveJobBar />
+      {/* Stats row (model / last response / context used) sits directly
+          under the topbar. The panel buttons + Bip are inside the
+          TitleBar itself — no more pill row above the stats. */}
+      <div className="flex justify-center">
         <ChatHeader />
       </div>
       <div className="flex flex-1 overflow-hidden">

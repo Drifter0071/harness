@@ -692,73 +692,110 @@ input[type="range"].slider-quartz::-moz-range-thumb {
 /* ════════════════════════════════════════════════════════════
    Bip — the harness agent mascot
    A pill-shaped robot giving the agent a visual presence. The
-   SVG body is static per mood; ALL motion is CSS-driven so it
-   stays cheap and honours prefers-reduced-motion. The mascot is
-   the one sanctioned non-Lucide illustration in the app — it is a
-   character, not an icon.
+   SVG body is persistent (single path per face feature) and
+   expression + color tween with GSAP on mood change; everything
+   else — breath, float, celebrate, tremble, blink, fin wiggle,
+   horn tip pulse, chest core pulse, halo, sparkle orbit — is
+   CSS so the whole character stays cheap and lockstep to a single
+   3.6s breath cycle.
    ════════════════════════════════════════════════════════════ */
 
-/* Float — idle (slow, dreamy) vs working (fast, rattled) */
-.mascot-bob        { animation: mascot-bob 3s ease-in-out infinite; }
-.mascot-bob--fast  { animation: mascot-bob-fast 0.9s ease-in-out infinite; }
-.mascot-bounce     { animation: mascot-bounce 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) 2,
-                                  mascot-wiggle 2.4s ease-in-out 1.4s infinite; }
-.mascot-shake      { animation: mascot-shake 0.42s ease-in-out infinite; }
+/* ── Body float ───────────────────────────────────────────
+   idle: slow dreamy drift        (3.6s = 1 breath cycle)
+   working: fast jittery rattle  (0.9s = 1/4 breath, alert pace)
+*/
+.bip-bob        { animation: bip-bob 3.6s ease-in-out infinite; }
+.bip-bob--fast  { animation: bip-bob-fast 0.9s ease-in-out infinite; }
+.bip-celebrate  { animation: bip-celebrate 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.bip-shake      { animation: bip-shake 0.42s ease-in-out infinite; }
 
-@keyframes mascot-bob {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-2.5px); }
+@keyframes bip-bob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50%      { transform: translateY(-2.5px) rotate(0.6deg); }
 }
-@keyframes mascot-bob-fast {
+@keyframes bip-bob-fast {
   0%, 100% { transform: translateY(0) rotate(0deg); }
   25%      { transform: translateY(-1.5px) rotate(-2deg); }
   75%      { transform: translateY(1px) rotate(2deg); }
 }
-/* Success hop — jump up, squash on landing, then rest */
-@keyframes mascot-bounce {
-  0%   { transform: translateY(0) scale(1, 1); }
-  30%  { transform: translateY(-7px) scale(0.96, 1.04); }
-  55%  { transform: translateY(0) scale(1.07, 0.92); }
-  75%  { transform: translateY(-2px) scale(1, 1); }
-  100% { transform: translateY(0) scale(1, 1); }
+/* Success — one-shot anticipation→launch→land→settle, then idle bob */
+@keyframes bip-celebrate {
+  0%   { transform: translateY(0)    scale(1, 1); }              /* neutral */
+  10%  { transform: translateY(0)    scale(0.94, 1.06); }         /* crouch */
+  30%  { transform: translateY(-9px) scale(1.06, 0.94); }         /* launch */
+  45%  { transform: translateY(-9px) scale(1.08, 0.92); }         /* apex hang */
+  60%  { transform: translateY(0)    scale(1.08, 0.92); }         /* land squash */
+  72%  { transform: translateY(-2px) scale(0.98, 1.02); }         /* overshoot */
+  100% { transform: translateY(0)    scale(1, 1); }              /* settle */
 }
-/* Success celebration — gentle ongoing wiggle + happy pulse after the
-   one-shot bounce settles. Layered behind the bounce via animation-delay
-   so the mascot keeps moving while it's in `success` mood. */
-@keyframes mascot-wiggle {
-  0%, 100% { transform: rotate(-2.5deg) scale(1, 1); }
-  50%      { transform: rotate(2.5deg) scale(1.05, 0.95); }
-}
-/* Error — small horizontal tremble + faint vertical jitter. Reads as
-   "hmm, something's off" without being noisy or seizure-bad. */
-@keyframes mascot-shake {
-  0%, 100% { transform: translate(0, 0) rotate(0deg); }
-  20%      { transform: translate(-0.8px, 0) rotate(-0.8deg); }
-  40%      { transform: translate(0.8px, 0.5px) rotate(0.8deg); }
+/* Error — small horizontal tremble + faint vertical jitter.
+   Reads as "hmm, something's off" without being seizure-bad. */
+@keyframes bip-shake {
+  0%, 100% { transform: translate(0, 0)    rotate(0deg); }
+  20%      { transform: translate(-0.8px, 0)    rotate(-0.8deg); }
+  40%      { transform: translate(0.8px, 0.5px)  rotate(0.8deg); }
   60%      { transform: translate(-0.6px, -0.5px) rotate(-0.6deg); }
-  80%      { transform: translate(0.6px, 0) rotate(0.6deg); }
+  80%      { transform: translate(0.6px, 0)     rotate(0.6deg); }
 }
 
-/* Eyes — slow contented blink for idle/working */
-.mascot-eyes {
+/* ── Body — static. No breath scale. The character just sits there
+   doing whatever bob/celebrate/shake the wrapper does. ─ */
+.bip-body { transform-box: fill-box; transform-origin: 50% 100%; }
+
+/* ── Brow plate — subtle alert lift on working (via :has on root) */
+.bip-brow {
   transform-box: fill-box;
-  transform-origin: center;
-  animation: mascot-blink 3.8s ease-in-out infinite;
+  transform-origin: 50% 100%;
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-@keyframes mascot-blink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  95%, 97%      { transform: scaleY(0.08); }
-}
+[data-mood="working"] .bip-brow { transform: translateY(-0.6px) scaleY(1.15); }
+[data-mood="error"]   .bip-brow { transform: translateY(0.4px)  scaleY(0.95); }
+[data-mood="success"] .bip-brow { transform: translateY(-0.3px) scaleY(1.08); }
 
-/* Antenna tip — soft breathing glow */
-.mascot-glow { animation: mascot-glow 1.8s ease-in-out infinite; }
-@keyframes mascot-glow {
-  0%, 100% { opacity: 0.45; }
-  50%      { opacity: 1; }
+/* ── Fins — gentle mirrored float, in phase with breath ─ */
+.bip-fin {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: bip-fin 3.6s ease-in-out infinite;
 }
+.bip-fin--right { animation-delay: -0.05s; }
+@keyframes bip-fin {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(1.2deg); }
+}
+.bip-fin--right { animation-name: bip-fin-right; }
+@keyframes bip-fin-right {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(-1.2deg); }
+}
+/* Fin edge — static, no dashoffset pulse (user feedback: no blinking
+   lights). The neon-lime edge just sits there. */
+.bip-fin-edge { stroke-dasharray: none; stroke-dashoffset: 0; }
 
-/* Ambient halo — soft colored aura behind the mascot; hue per mood
-   is passed from React as `--halo-color` (an rgba string). */
+/* ── Eyes — no blink, no pulse. The eyes are the character; a hard
+   scaleY snap reads as cheap. (Catches a blink via morph only.) ─ */
+.bip-eye { transform-box: fill-box; transform-origin: center; }
+
+/* Catch-lights — static, no wink */
+.bip-catchlight { transform-box: fill-box; transform-origin: center; }
+
+/* Cheek dots — static accent dots. No opacity/scale pulse. */
+.bip-cheek { transform-box: fill-box; transform-origin: center; }
+
+/* Mouth — static, no squash. */
+.bip-mouth { transform-box: fill-box; transform-origin: 50% 100%; }
+
+/* Nose crest — static, no draw-on. (User feedback: no blinking
+   lights — a stroke-dashoffset draw is a "wink".) */
+.bip-nose-crest { stroke-dasharray: none; stroke-dashoffset: 0; }
+
+/* ── No horn-tip pulse, no chest-core pulse, no auras, no
+   mascot-glow. The horn tip + chest core are static colored dots
+   that re-tint with the mood. ─ */
+
+/* ── Halo — soft colored aura behind the mascot; hue per mood
+     is passed from React as `--halo-color` (an rgba string).
+     Static — no pulse, no scale. (User feedback: no blinking lights.) ─ */
 .mascot-halo {
   position: absolute;
   inset: -8px;
@@ -766,23 +803,25 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   background: radial-gradient(circle, var(--halo-color, rgba(255, 255, 255, 0.10)) 0%, transparent 68%);
   filter: blur(3px);
   pointer-events: none;
-  animation: mascot-halo 2.8s ease-in-out infinite;
-}
-@keyframes mascot-halo {
-  0%, 100% { opacity: 0.55; transform: scale(1); }
-  50%      { opacity: 1; transform: scale(1.06); }
+  transition: background 480ms ease;
 }
 
-/* Working — "data bits" orbiting the head (sky / sun / mint) */
-.mascot-orbit {
+/* ── Sparkle orbit (working) — static, not pulsing. The frame
+   rotates slowly so the bits drift, but each bit does not scale
+   in/out (that was reading as blinking lights). The bits just sit
+   there and the frame carries them. ─ */
+.bip-sparkle { transform-box: fill-box; transform-origin: center; }
+.bip-orbit-frame {
   transform-box: fill-box;
   transform-origin: center;
-  animation: mascot-spin 3.4s linear infinite;
+  animation: bip-orbit-spin 7.2s linear infinite;
 }
-@keyframes mascot-spin { to { transform: rotate(360deg); } }
+@keyframes bip-orbit-spin { to { transform: rotate(360deg); } }
 
-/* Success — confetti pieces burst from the mascot's center.
-   Direction/size come from per-piece CSS vars set inline. */
+/* ── Confetti — launch → apex → land (with tiny settle), with
+     real gravity feel. The 0% position is the launch point; 65%
+     is the apex (using the same ease as the launch); 100% is
+     the land. Rotates through the full motion. ─ */
 .confetti-piece {
   position: absolute;
   left: 50%;
@@ -790,22 +829,23 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   width: 4px;
   height: 4px;
   border-radius: 1px;
-  animation: confetti-burst 1.5s cubic-bezier(0.16, 0.84, 0.44, 1) forwards;
+  animation: confetti-burst 1.6s cubic-bezier(0.16, 0.84, 0.44, 1) forwards;
 }
 @keyframes confetti-burst {
-  0%   { transform: translate(0, 0) rotate(0deg) scale(1); opacity: 1; }
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1);    opacity: 1; }
+  65%  { transform: translate(calc(var(--tx, 10px) * 0.85), calc(var(--ty, -14px) * 0.85)) rotate(calc(var(--rot, 180deg) * 0.55)) scale(0.85); opacity: 1; }
   100% { transform: translate(var(--tx, 10px), var(--ty, -14px)) rotate(var(--rot, 180deg)) scale(0.35); opacity: 0; }
 }
 
-/* Typing buddy — the tiny Bip that "types" text into the stream,
-   or sweeps it up while the agent stream-deletes. */
-.mascot-typing { animation: mascot-typing 0.5s ease-in-out infinite; }
-@keyframes mascot-typing {
+/* ── Typing buddy — the tiny Bip that "types" text into the stream,
+     or sweeps it up while the agent stream-deletes. ─ */
+.mascot-typing { animation: bip-typing 0.5s ease-in-out infinite; }
+@keyframes bip-typing {
   0%, 100% { transform: translateY(0); }
   50%      { transform: translateY(-2px); }
 }
-.mascot-sweep { animation: mascot-sway 0.45s ease-in-out infinite; }
-@keyframes mascot-sway {
+.mascot-sweep { animation: bip-sway 0.45s ease-in-out infinite; }
+@keyframes bip-sway {
   0%, 100% { transform: rotate(-2deg); }
   50%      { transform: rotate(2deg); }
 }
@@ -824,14 +864,25 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   100% { transform: translate(var(--dx, -6px), var(--dy, -5px)); opacity: 0; }
 }
 
+/* ── Reduced motion: keep a beautiful static pose, not "frozen
+     mid-frame". All animations stop, but the body still has a
+     single neutral state: eyes at their natural expression, no
+     fin/orbit spin, no bouncing. Confetti vanishes (it's a one-shot
+     celebration that depends on motion). ─ */
 @media (prefers-reduced-motion: reduce) {
-  .mascot-bob, .mascot-bob--fast, .mascot-bounce, .mascot-shake,
-  .mascot-eyes, .mascot-glow, .mascot-halo, .mascot-orbit,
-  .confetti-piece, .mascot-typing, .mascot-sweep, .broom-wiggle,
-  .sweep-dust {
-    animation: none;
+  .bip-bob, .bip-bob--fast, .bip-celebrate, .bip-shake,
+  .bip-body, .bip-brow, .bip-fin, .bip-fin-edge,
+  .bip-eye, .bip-catchlight, .bip-cheek, .bip-mouth,
+  .bip-nose-crest,
+  .mascot-halo, .bip-sparkle, .bip-orbit-frame,
+  .confetti-piece, .mascot-typing, .mascot-sweep,
+  .broom-wiggle, .sweep-dust {
+    animation: none !important;
+    transition: none !important;
   }
   .confetti-piece { opacity: 0; }
+  .bip-fin   { transform: none; }
+  .bip-cheek { transform: none; opacity: 0.7; }
 }
 
 /* ── Composer — soft mint focus ring (the one colored focus in the
