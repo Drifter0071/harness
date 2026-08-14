@@ -1,16 +1,17 @@
 # Composer v2 — Slash Commands, CommandMode, Per-Session Memory, Compacting
 
 **Date:** 2026-08-14
-**Status:** Draft v1.2 (pending re-review iteration 3)
+**Status:** Draft v1.3 (pending human review)
 **Author:** Mavis (brainstorming session with @gellert)
 
 > **Revision history:**
 > - v1 — initial draft, **FAIL** on first spec-review (17 issues).
 > - v1.1 — fixed 15/17; remaining 2 were acknowledged (naming, fix-and-test
 >   pair). Spec review returned **FAIL** with 10 new findings (3 P0).
-> - v1.2 (this doc) — fixes the v1.1 findings. See
->   [Changelog of reviewer fixes](#appendix-a-changelog-of-reviewer-fixes-v1--v11)
->   appendix.
+> - v1.2 — fixed 9 of 10; one blocking finding (Fix 4: `complete_with_system_prompt`
+>   had wrong trait location, misnamed impl, `async fn` contradicting
+>   codebase's boxed-future convention).
+> - v1.3 (this doc) — fixes Fix 4. Spec is ready for human review.
 
 ## Summary
 
@@ -866,30 +867,37 @@ In `src-tauri/src/agent_loop.rs` and a new `src-tauri/src/compact.rs`:
 
 ### 6.7.5 `complete_with_system_prompt` — LLM client extension (PR3)
 
-A new function on the `TurnCompleter` trait in `src-tauri/src/llm_client.rs`:
+A new method on the existing `TurnCompleter` trait at
+`src-tauri/src/agent_loop.rs:172`. The new method follows the trait's
+existing **boxed-future** pattern (NOT `#[async_trait]`/`async fn`) —
+the codebase has an explicit comment at `agent_loop.rs:168-171` saying
+the boxed-future pattern is used "without pulling in async-trait".
+The new method matches the shape of the existing `complete` method at
+`agent_loop.rs:174`.
 
 ```rust
-#[async_trait]
 pub trait TurnCompleter: Send + Sync {
-    // existing methods (e.g., complete_with_tools) unchanged
+    // existing complete() unchanged
 
     /// Single-shot LLM call: given a system prompt and a user prompt,
     /// return the assistant's response as a string. No streaming, no
     /// tool calls, no message array — the compactor needs a single
     /// text blob to fold into a summary message.
-    async fn complete_with_system_prompt(
+    fn complete_with_system_prompt(
         &self,
         system_prompt: &str,
         user_prompt: &str,
         model_id: &str,
-        secrets: &dyn SecretStore,
         cancel_rx: tokio::sync::oneshot::Receiver<()>,
-    ) -> Result<String, AgentTurnError>;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, AgentTurnError>> + Send>>;
 }
 ```
 
 Properties:
 
+- **Boxed-future shape**: matches the existing `complete` method to keep
+  the trait dyn-compatible and consistent with the codebase convention.
+  Implementers wrap the body in `Box::pin(async move { ... })`.
 - **No streaming**: returns a single `String`. The compactor needs the
   full summary before it can replace the folded range. Streaming would
   require partial-state handling that the compactor doesn't need.
@@ -897,23 +905,31 @@ Properties:
   LLM is given only the system + user prompt; tool use would be
   irrelevant (and confusing — the LLM might call `read_file` on the
   very files we're trying to summarize out).
-- **Cancellation**: the existing `cancel_rx` pattern from
-  `complete_with_tools` is reused. A cancelled compact fails the same
-  way a thrown LLM error does (session left unchanged).
-- **Error type**: reuses the existing `AgentTurnError` enum. The compactor
-  catches any variant and treats it as a summarization failure
-  (§6.3 step 5).
+- **No `secrets` parameter**: the trait method accesses `self.secrets`
+  (matching how `complete` already works). The caller does not pass
+  secrets; the impl does. This is consistent with the existing trait.
+- **Cancellation**: the existing `oneshot::Receiver<()>` pattern from
+  `complete` is reused. A cancelled compact fails the same way a
+  thrown LLM error does (session left unchanged).
+- **Error type**: reuses the existing `AgentTurnError` enum. The
+  compactor catches any variant and treats it as a summarization
+  failure (§6.3 step 5).
 
-Implementations:
+Implementations (all three existing `TurnCompleter` impls must implement
+the new method):
 
-- `OpenAiCompleter` — implemented in the OpenAI dispatch path. Uses the
-  chat completions API with `messages: [{role: "system", content: ...},
-  {role: "user", content: ...}]`, `tools: None`, `stream: false`. The
-  provider's response is unwrapped to a single string.
-- `MockCompleter` (test) — returns a canned summary or an error per test
-  setup.
+1. **`LlmClientTurner`** at `src-tauri/src/agent_loop.rs:196` — the
+   production impl. Uses the OpenAI chat completions API with
+   `messages: [{role: "system", content: ...}, {role: "user", content: ...}]`,
+   `tools: None`, `stream: false`. The provider's response is unwrapped
+   to a single string.
+2. **`MockCompleter` (test)** at `src-tauri/src/agent_loop.rs:1386` —
+   returns a canned summary or an error per test setup.
+3. **`MockCompleter` (test)** at `src-tauri/src/tools.rs:1586` —
+   structurally identical to the agent_loop mock; returns a canned
+   summary or an error per test setup.
 
-**Tests** (PR3, in `llm_client.rs` and `compact.rs`):
+**Tests** (PR3, in `agent_loop.rs` and `compact.rs`):
 
 - `complete_with_system_prompt_returns_string` — happy path: returns the
   canned string verbatim.
@@ -1047,3 +1063,18 @@ findings (3 P0, 4 P2, 3 P3). v1.2 addresses them.
 arbitration rationale) was acknowledged but the design kept — slash
 wins is implementable and the tests cover the cases. The spec is ready
 for re-review.
+
+### Appendix A.2: v1.2 → v1.3
+
+The v1.2 spec was reviewed again (iteration 3 of 3 — the last allowed
+per the brainstorming skill). The reviewer returned **FAIL** with one
+blocking issue.
+
+| Finding | Severity | Status | Fix |
+|---------|----------|--------|-----|
+| §6.7.5 `complete_with_system_prompt` had 3 concrete errors: wrong trait location (`llm_client.rs` vs actual `agent_loop.rs:172`); misnamed production impl (`OpenAiCompleter` vs actual `LlmClientTurner`); `async fn` + `#[async_trait]` contradicting the codebase's boxed-future convention (explicit comment at `agent_loop.rs:168-171`) | P0 | ✅ Fixed | §6.7.5: rewritten to use the boxed-future shape; trait location corrected to `agent_loop.rs:172`; production impl named `LlmClientTurner`; all three impls enumerated (LlmClientTurner + 2 MockCompleter instances) |
+| Refusal patterns too broad (legitimate summaries could contain "I cannot...") | P2 cosmetic | ⏸ Deferred | Noted in §6.3 step 5.2; implementer can tighten to `starts_with` or use more specific patterns |
+
+**Summary**: 1 blocking issue fixed. 1 cosmetic concern deferred with a
+note for the implementer. The spec has been through 3 review iterations
+and is now ready for human review.
