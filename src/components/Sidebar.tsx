@@ -276,7 +276,7 @@ function SessionsPanel() {
         tokenStats: created.tokenStats ?? null,
         sessionMeta: { createdAt: created.createdAt, updatedAt: created.updatedAt },
         goalMode: created.goalMode ?? false,
-        actionMode: created.actionMode ?? "askRisky",
+        commandMode: created.lastMode ?? "commands",
         streamingRequestId: null,
         jobActivities: [],
       });

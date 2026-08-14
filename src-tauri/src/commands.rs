@@ -6,11 +6,14 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentMessage, AgentRole, AgentStatus};
+use crate::agent_loop::{AgentEventSink, AppEventSink, LlmClientTurner, TurnCompleter};
+use crate::compact::{self as compact_mod, CompactResult};
 use crate::llm_client;
 use crate::models as models_mod;
 use crate::personalities::{AgentPersonality, PersonalityRoster};
 use crate::secrets::SecretStore;
 use crate::tools::BipState;
+use tokio::sync::oneshot;
 
 // ============================= App State =============================
 
@@ -406,6 +409,86 @@ pub async fn set_active_session(project_path: String, session_id: String) -> Res
     crate::session::set_active_session(&project_path, &session_id).await
 }
 
+// ============================= Per-session mode/model persistence (spec §5.2) =============================
+
+/// Persist the command mode for a session without re-saving the whole file.
+/// Used by the frontend's mode toggle; debounced on the TS side.
+#[tauri::command]
+pub async fn set_session_mode(
+    project_path: String,
+    session_id: String,
+    mode: crate::session::CommandMode,
+) -> Result<crate::session::Session, String> {
+    let mut session = crate::session::load_session(&project_path, &session_id)
+        .await?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+    session.last_mode = mode;
+    crate::session::save_session(&project_path, session).await
+}
+
+/// Persist the last-used model id for a session without re-saving the whole file.
+/// Used by the frontend's model switcher.
+#[tauri::command]
+pub async fn set_session_model(
+    project_path: String,
+    session_id: String,
+    model_id: String,
+) -> Result<crate::session::Session, String> {
+    let mut session = crate::session::load_session(&project_path, &session_id)
+        .await?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+    session.last_model_id = Some(model_id);
+    crate::session::save_session(&project_path, session).await
+}
+
+/// Compact a session's message history into a single summary message (spec §6).
+///
+/// Takes `project_path` and `session_id` so the frontend can call it without
+/// threading the full `Session` object over IPC. On success returns a
+/// `CompactResult` describing the fold; on failure returns an error string so
+/// the frontend can surface a meaningful toast.
+#[tauri::command]
+pub async fn compact_chat(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project_path: String,
+    session_id: String,
+    model_id: String,
+) -> Result<CompactResult, String> {
+    let mut session = crate::session::load_session(&project_path, &session_id)
+        .await
+        .map_err(|e| format!("Failed to load session: {}", e))?
+        .ok_or_else(|| format!("Session {} not found", session_id))?;
+
+    // Build the completer and event sink from app state.
+    let secrets = Arc::clone(&state.secrets);
+    let completer = Arc::new(LlmClientTurner::new(secrets)) as Arc<dyn TurnCompleter>;
+    let sink = Arc::new(AppEventSink::new(app.clone())) as Arc<dyn AgentEventSink>;
+
+    // A pre-dropped receiver means "not cancelled" — compaction runs to completion.
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+    // Core compaction (leaves session unchanged on failure).
+    let result = compact_mod::compact_chat(&mut session, &model_id, completer, cancel_rx)
+        .await
+        .map_err(|e| match e {
+            compact_mod::CompactError::NothingToCompact => {
+                "Nothing to compact — need at least 2 non-summary messages.".to_string()
+            }
+            compact_mod::CompactError::BadSummary => {
+                "Summary was too short or looks like a refusal — try again.".to_string()
+            }
+            compact_mod::CompactError::Llm(llm_err) => {
+                format!("LLM error during compaction: {:?}", llm_err)
+            }
+        })?;
+
+    // Persist and emit the chat-compacted event so the frontend can show a toast.
+    compact_mod::persist_compact(&session, &result, &sink).await;
+
+    Ok(result)
+}
+
 // ============================= Agent turn loop =============================
 
 /// Kick off one agent turn for a session. Returns immediately; progress
@@ -423,7 +506,7 @@ pub async fn run_agent_turn(
     session_id: String,
     model_id: String,
     message: String,
-    action_mode: crate::session::ActionMode,
+    mode: crate::session::CommandMode,
     goal_mode: bool,
     workspace: String,
     reasoning_effort: Option<crate::models::ReasoningEffort>,
@@ -455,7 +538,7 @@ pub async fn run_agent_turn(
         in_flight: state.agent_in_flight.clone(),
         sink: sink.clone(),
         workspace: workspace.clone(),
-        action_mode: action_mode.clone(),
+        mode: mode.clone(),
         reasoning_effort,
         chat_model_id: model_id.clone(),
         request_id: request_id.clone(),
@@ -466,7 +549,7 @@ pub async fn run_agent_turn(
         session,
         model_id,
         message,
-        action_mode,
+        mode,
         goal_mode,
         workspace,
         sink,

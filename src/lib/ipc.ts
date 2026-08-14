@@ -56,7 +56,7 @@ export interface SessionMessage {
   reasoning?: string;
 }
 
-export type ActionMode = "auto" | "askRisky" | "askAll";
+export type CommandMode = "commands" | "yolo";
 
 export type ToolActivityStatus = "ran" | "denied" | "error";
 
@@ -100,7 +100,16 @@ export interface Session {
   updatedAt: string;
   agent: AgentSnapshot;
   goalMode: boolean;
-  actionMode: ActionMode;
+  lastMode: CommandMode;
+  lastModelId?: string | null;
+  compact?: {
+    compactedAt: string;
+    summaryMessageId: string;
+    originalCount: number;
+    tokenEstimateBefore: number;
+    tokenEstimateAfter: number;
+  } | null;
+  compactThreshold: number;
   messages: SessionMessage[];
   activities: ToolActivity[];
   /** Null until the first assistant response arrives (spec §4.5b). */
@@ -374,7 +383,7 @@ export interface AgentTurnRequest {
   sessionId: string;
   modelId: string;
   message: string;
-  actionMode: ActionMode;
+  lastMode: CommandMode;
   goalMode: boolean;
   workspace: string;
   /** Optional reasoning-effort level forwarded to the provider so
@@ -611,11 +620,22 @@ export const ipc = {
       sessionId: req.sessionId,
       modelId: req.modelId,
       message: req.message,
-      actionMode: req.actionMode,
+      lastMode: req.lastMode,
       goalMode: req.goalMode,
       workspace: req.workspace,
       reasoningEffort: req.reasoningEffort,
     }),
+  // Per-session mode/model persistence (spec §5.2)
+  setSessionMode: (projectPath: string, sessionId: string, mode: CommandMode) =>
+    invoke<void>("set_session_mode", { projectPath, sessionId, mode }),
+  setSessionModel: (projectPath: string, sessionId: string, modelId: string) =>
+    invoke<void>("set_session_model", { projectPath, sessionId, modelId }),
+  /** Compact a session's message history into a single summary (spec §6). */
+  compactChat: (projectPath: string, sessionId: string, modelId: string) =>
+    invoke<{ originalCount: number; tokenEstimateBefore: number; tokenEstimateAfter: number }>(
+      "compact_chat",
+      { projectPath, sessionId, modelId },
+    ),
   respondApproval: (requestId: string, allow: boolean) =>
     invoke<void>("respond_approval", { requestId, allow }),
   cancelAgent: (requestId: string) =>

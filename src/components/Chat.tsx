@@ -12,9 +12,11 @@ import { capabilitiesFor } from "../lib/model-capabilities";
 import { chatErrorActions } from "../lib/chat-errors";
 import { showToast } from "../lib/toast";
 import { startAgentTurn, cancelAgentTurn, respondApproval, flushPendingSave } from "../lib/session-manager";
+import { COMMANDS, executeCommand } from "../lib/commands";
+import type { CommandContext } from "../lib/commands";
 import { Loader2, Square, Settings, RefreshCw, ShieldCheck, Target, Check, X, Wrench, Ban, AlertTriangle, ListPlus, Pencil, Zap } from "lucide-react";
 import type { SessionMessage, Mention, ToolCallRecord, QueuedMessage } from "../lib/store";
-import type { ActionMode, ReasoningEffort } from "../lib/ipc";
+import type { CommandMode, ReasoningEffort } from "../lib/ipc";
 
 const nowIso = () => new Date().toISOString();
 
@@ -31,10 +33,9 @@ type ComposerState =
   | "streaming"
   | "ready";
 
-const ACTION_MODES: { value: ActionMode; label: string; hint: string }[] = [
-  { value: "auto", label: "Auto", hint: "Run all tools without asking" },
-  { value: "askRisky", label: "Ask risky", hint: "Ask before writes and commands" },
-  { value: "askAll", label: "Ask all", hint: "Ask before every tool call" },
+const COMMAND_MODES: { value: CommandMode; label: string; hint: string }[] = [
+  { value: "commands", label: "Commands", hint: "Ask before running shell commands" },
+  { value: "yolo", label: "Yolo", hint: "Run all tools without asking" },
 ];
 
 export function Chat() {
@@ -70,7 +71,7 @@ export function Chat() {
   const streamingRequestId = useStore((s) => s.streamingRequestId);
   const agentRequestId = useStore((s) => s.agentRequestId);
   const pendingApproval = useStore((s) => s.pendingApproval);
-  const actionMode = useStore((s) => s.actionMode);
+  const commandMode = useStore((s) => s.commandMode);
   const setActionMode = useStore((s) => s.setActionMode);
   const goalMode = useStore((s) => s.goalMode);
   const setGoalMode = useStore((s) => s.setGoalMode);
@@ -390,28 +391,59 @@ export function Chat() {
   };
 
   const handleCommand = async (cmd: string) => {
-    const parts = cmd.split(/\s+/);
-    const command = parts[0].toLowerCase();
-    if (command === "/search") {
-      const query = parts.slice(1).join(" ");
-      if (!query) {
-        appendMessage({ id: nanoid(), role: "system", content: "Usage: /search <query>", timestamp: nowIso() });
-        return;
-      }
-      setIsProcessing(true);
-      setJobActivities([`Searching: ${query}`]);
-      try {
-        const results = await ipc.webSearch(query);
-        const formatted = results.map((r, i) => `**${i + 1}. ${r.title}**\n${r.url}\n${r.snippet}`).join("\n\n");
-        appendMessage({ id: nanoid(), role: "assistant", content: formatted || "No results found.", timestamp: nowIso(), agentName: "Search" });
-      } catch (err) {
-        appendMessage({ id: nanoid(), role: "system", content: `Search failed: ${err}`, timestamp: nowIso() });
-      } finally {
-        setIsProcessing(false);
-        setJobActivities([]);
-      }
-    } else {
-      appendMessage({ id: nanoid(), role: "system", content: `Unknown command: ${command}. Available: /search`, timestamp: nowIso() });
+    // Strip the leading "/" and split into name + args.
+    const raw = cmd.trim();
+    if (!raw.startsWith("/")) return;
+    const afterSlash = raw.slice(1);
+    const spaceIdx = afterSlash.indexOf(" ");
+    const name = spaceIdx >= 0
+      ? afterSlash.slice(0, spaceIdx).toLowerCase()
+      : afterSlash.toLowerCase();
+    const input = spaceIdx >= 0 ? afterSlash.slice(spaceIdx + 1) : "";
+
+    // Build the execution context (spec §2.3 CommandContext).
+    // PR3 will migrate setMode to CommandMode and wire compact.
+    const ctx: CommandContext = {
+      session: null,
+      input,
+      pushUserMessage: (text: string) =>
+        appendMessage({ id: nanoid(), role: "system", content: text, timestamp: nowIso() }),
+      setMode: (m: CommandMode) => setActionMode(m),
+      setModel: (id: string) => {
+        const st = useStore.getState();
+        const found = st.savedModels.find((mod) => mod.id === id);
+        if (found) st.setActiveModelId(id);
+      },
+      availableModelIds: savedModels.map((m) => m.id),
+      currentModeLabel: COMMAND_MODES.find((a) => a.value === commandMode)?.label ?? "Commands",
+      currentModelLabel: activeModel?.label ?? "(none)",
+      compact: async () => {
+        if (!workspacePath || !activeSessionId || !activeModelId) {
+          showToast("Open a project session first.");
+          return;
+        }
+        try {
+          const result = await ipc.compactChat(workspacePath, activeSessionId, activeModelId);
+          showToast(`Compacted ${result.originalCount} messages → 1 summary`);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err));
+        }
+      },
+      clear: () => {
+        const st = useStore.getState();
+        st.setMessages([]);
+        showToast("Chat cleared.");
+      },
+      showToast,
+    };
+
+    const result = await executeCommand(name, input, ctx);
+
+    if (result.userMessage) {
+      appendMessage({ id: nanoid(), role: "system", content: result.userMessage, timestamp: nowIso() });
+    }
+    if (result.toast) {
+      showToast(result.toast);
     }
   };
 
@@ -567,14 +599,14 @@ export function Chat() {
             <div className="flex items-center gap-3 mb-2 select-none">
               <span className="text-[11px] text-white-30">Actions:</span>
               <div className="flex items-center gap-px rounded-md bg-surface-2 border border-border-subtle p-0.5">
-                {ACTION_MODES.map((m) => (
+                {COMMAND_MODES.map((m) => (
                   <button
                     key={m.value}
                     type="button"
                     title={m.hint}
                     onClick={() => setActionMode(m.value)}
                     className={`px-2.5 py-1 text-[11px] font-medium rounded-[5px] transition-all duration-150 ${
-                      actionMode === m.value
+                      commandMode === m.value
                         ? "bg-white/[0.08] text-white border border-border-strong"
                         : "text-white-30 hover:text-white-50 hover:bg-white/[0.04] border border-transparent"
                     }`}
@@ -662,6 +694,11 @@ export function Chat() {
               onSend={(text, mentions) => handleSubmit(text, mentions)}
               disabled={composerBlocked || isProcessing}
               placeholder={placeholder}
+              slashCommands={{
+                commands: COMMANDS,
+                currentModeLabel: COMMAND_MODES.find((a) => a.value === commandMode)?.label ?? "Commands",
+                currentModelLabel: activeModel?.label ?? "(none)",
+              }}
             />
             {composerState === "streaming" ? (
               <div className="flex items-center shrink-0 m-1.5 gap-1">

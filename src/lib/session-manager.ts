@@ -21,7 +21,7 @@ import {
 } from "./ipc";
 import { listen } from "@tauri-apps/api/event";
 import type {
-  ActionMode,
+  CommandMode,
   AgentSnapshot,
   AgentTurnRequest,
   ReasoningEffort,
@@ -44,7 +44,7 @@ interface PendingSnapshot {
   activities: ToolActivity[];
   tokenStats: TokenStats | null;
   agent: AgentSnapshot | null;
-  actionMode: ActionMode;
+  lastMode: CommandMode;
   goalMode: boolean;
   createdAt: string | null;
 }
@@ -110,7 +110,8 @@ async function saveNow(snapshot: PendingSnapshot): Promise<void> {
     updatedAt: new Date().toISOString(),
     agent: snapshot.agent ?? fallbackAgent(),
     goalMode: snapshot.goalMode,
-    actionMode: snapshot.actionMode,
+    lastMode: snapshot.lastMode,
+    compactThreshold: 0.8,
     messages: snapshot.messages,
     activities: snapshot.activities,
     tokenStats: snapshot.tokenStats ?? diskTokenStats,
@@ -148,7 +149,7 @@ function captureSnapshot(): PendingSnapshot | null {
     activities: st.activities,
     tokenStats: st.tokenStats,
     agent: currentAgent,
-    actionMode: st.actionMode,
+    lastMode: st.commandMode,
     goalMode: st.goalMode,
     createdAt: st.sessionMeta?.createdAt ?? null,
   };
@@ -233,7 +234,7 @@ function applySession(session: Session, projectPath: string): void {
     sessionMeta: { createdAt: session.createdAt, updatedAt: session.updatedAt },
     tokenStats: session.tokenStats ?? null,
     goalMode: session.goalMode,
-    actionMode: session.actionMode,
+    commandMode: session.lastMode,
     sessionLoaded: true,
   });
   refreshSessions(projectPath);
@@ -452,7 +453,7 @@ export async function startAgentTurn(
     sessionId: st.activeSessionId,
     modelId: st.activeModelId,
     message: text,
-    actionMode: st.actionMode,
+    lastMode: st.commandMode,
     goalMode: st.goalMode,
     workspace: st.workspacePath,
     reasoningEffort,

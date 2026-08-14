@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
-import { parseMentionQuery, rankMentionResults } from "../lib/mention-utils";
+import { parseMentionQuery, rankMentionResultsThrottled } from "../lib/mention-utils";
+import { parseSlashQuery, filterCommands } from "../lib/commands";
+import type { Command } from "../lib/commands";
 import { FileTypeIcon } from "../lib/file-icons";
 import type { Mention } from "../lib/store";
+import { ComposerPopover } from "./ComposerPopover";
+import { SlashCommandPopover } from "./SlashCommandPopover";
 
 interface Props {
   value: string;
@@ -10,12 +14,26 @@ interface Props {
   onSend: (text: string, mentions: Mention[]) => void;
   disabled?: boolean;
   placeholder?: string;
+  /** Slash popover data supplied by Chat.tsx. MentionInput owns the open
+   *  state and keyboard nav; Chat supplies the command list and labels. */
+  slashCommands?: {
+    commands: Command[];
+    currentModeLabel: string;
+    currentModelLabel: string;
+  };
 }
 
-interface PopoverState {
+interface MentionPopoverState {
   open: boolean;
   query: string;
   results: string[];
+  selectedIndex: number;
+}
+
+interface SlashPopoverState {
+  open: boolean;
+  query: string;
+  results: Command[];
   selectedIndex: number;
 }
 
@@ -25,110 +43,215 @@ export function MentionInput({
   onSend,
   disabled,
   placeholder,
+  slashCommands,
 }: Props) {
   const { fileTree, workspacePath } = useStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const [popover, setPopover] = useState<PopoverState>({
+
+  const [mentionPopover, setMentionPopover] = useState<MentionPopoverState>({
     open: false,
     query: "",
     results: [],
     selectedIndex: 0,
   });
 
-  // Update popover position + results whenever the textarea caret moves
-  // and the mention is "active".
+  const [slashPopover, setSlashPopover] = useState<SlashPopoverState>({
+    open: false,
+    query: "",
+    results: [],
+    selectedIndex: 0,
+  });
+
+  // ── recomputePopover — runs on every keystroke (spec §2.7 arbitration) ──
   const recomputePopover = () => {
     const ta = textareaRef.current;
     if (!ta) return;
     const caret = ta.selectionStart ?? 0;
-    const parsed = parseMentionQuery(value, caret);
-    if (!parsed.active || !workspacePath) {
-      setPopover((p) => (p.open ? { ...p, open: false } : p));
-      return;
-    }
-    // A space right before the caret means the mention token ended — the
-    // user is typing the next word. Dismiss like an editor would.
+
+    // Whitespace before caret always closes the mention popover.
     if (caret > 0 && /\s/.test(value[caret - 1])) {
-      setPopover((p) => (p.open ? { ...p, open: false } : p));
-      return;
+      setMentionPopover((p) => (p.open ? { ...p, open: false } : p));
     }
-    const results = rankMentionResults(parsed.query, fileTree);
-    setPopover({
-      open: true,
-      query: parsed.query,
-      results,
-      selectedIndex: 0,
-    });
+
+    // 1. Compute mention activation.
+    const parsed = parseMentionQuery(value, caret);
+    const mentionActive = parsed.active && !!workspacePath;
+
+    // 2. Compute slash activation (only when slashCommands prop is provided).
+    let slashActive = false;
+    let slashQuery = "";
+    if (slashCommands) {
+      const slashParsed = parseSlashQuery(value, caret);
+      slashActive = slashParsed.active;
+      slashQuery = slashParsed.query;
+    }
+
+    // 3. Arbitration: at most one popover is open. Slash wins.
+    //    (spec §2.7: slash is more "command-like"; @ mid-token is often a typo.)
+    const slashIsOpen = slashActive;
+    const mentionIsOpen = mentionActive && !slashActive;
+
+    // Update mention popover.
+    if (mentionIsOpen) {
+      setMentionPopover((p) => ({
+        ...p,
+        open: true,
+        query: parsed.query,
+        selectedIndex: 0,
+      }));
+      rankMentionResultsThrottled(parsed.query, fileTree, (results) => {
+        setMentionPopover((p) => ({ ...p, results }));
+      });
+    } else {
+      setMentionPopover((p) => (p.open ? { ...p, open: false } : p));
+    }
+
+    // Update slash popover.
+    if (slashCommands) {
+      const filtered = filterCommands(slashQuery);
+      if (slashIsOpen) {
+        setSlashPopover({
+          open: true,
+          query: slashQuery,
+          results: filtered,
+          selectedIndex: 0,
+        });
+      } else {
+        setSlashPopover((p) => (p.open ? { ...p, open: false } : p));
+      }
+    }
   };
 
   useEffect(() => {
     recomputePopover();
-    // We intentionally depend on `value` so each keystroke re-evaluates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, fileTree, workspacePath]);
 
-  // Keep the keyboard-selected row in view while scrolling the list.
-  useEffect(() => {
-    if (!popover.open) return;
-    const el = listRef.current?.querySelector('[data-selected="true"]');
-    el?.scrollIntoView({ block: "nearest" });
-  }, [popover.selectedIndex, popover.open]);
+  // ── Mention commit ──────────────────────────────────────────────────────────
 
-  const commitSelection = (path: string) => {
+  const commitMentionSelection = (path: string) => {
     const ta = textareaRef.current;
     if (!ta) return;
     const caret = ta.selectionStart ?? 0;
-    // Find the `@` that started this mention.
     const parsed = parseMentionQuery(value, caret);
     if (!parsed.active) return;
     const at = value.lastIndexOf("@", caret - 1);
     if (at < 0) return;
-    // Replace the @query with @<path> and add a trailing space.
     const before = value.slice(0, at);
     const after = value.slice(caret);
     const insertion = `@${path} `;
     const next = before + insertion + after;
     onChange(next);
-    // Restore caret right after the insertion.
     requestAnimationFrame(() => {
       const pos = before.length + insertion.length;
       ta.focus();
       ta.setSelectionRange(pos, pos);
     });
-    setPopover((p) => ({ ...p, open: false }));
+    setMentionPopover((p) => ({ ...p, open: false }));
   };
 
+  // ── Slash commit — insert command name + space into textarea (spec §2.4) ──
+
+  const commitSlashSelection = (commandName: string) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const caret = ta.selectionStart ?? 0;
+    const lineStart = value.lastIndexOf("\n", caret - 1) + 1;
+    // Replace the partial command token with the full name + space.
+    const before = value.slice(0, lineStart);
+    const after = value.slice(caret);
+    const insertion = `/${commandName} `;
+    const next = before + insertion + after;
+    onChange(next);
+    requestAnimationFrame(() => {
+      const pos = before.length + insertion.length;
+      ta.focus();
+      ta.setSelectionRange(pos, pos);
+    });
+    setSlashPopover((p) => ({ ...p, open: false }));
+  };
+
+  // ── Shared keyboard handler for both popovers ──────────────────────────────
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (popover.open && popover.results.length > 0) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setPopover((p) => ({
+    // Unified arrow/enter/esc handler: whichever popover is open handles it.
+    const mentionOpen = mentionPopover.open && mentionPopover.results.length > 0;
+    const slashOpen = slashPopover.open && slashPopover.results.length > 0;
+
+    const moveDown = () => {
+      if (slashOpen) {
+        setSlashPopover((p) => ({
+          ...p,
+          selectedIndex: (p.selectedIndex + 1) % Math.max(p.results.length, 1),
+        }));
+      } else if (mentionOpen) {
+        setMentionPopover((p) => ({
           ...p,
           selectedIndex: (p.selectedIndex + 1) % p.results.length,
         }));
-        return;
       }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setPopover((p) => ({
+    };
+
+    const moveUp = () => {
+      if (slashOpen) {
+        setSlashPopover((p) => ({
+          ...p,
+          selectedIndex:
+            (p.selectedIndex - 1 + Math.max(p.results.length, 1)) %
+            Math.max(p.results.length, 1),
+        }));
+      } else if (mentionOpen) {
+        setMentionPopover((p) => ({
           ...p,
           selectedIndex:
             (p.selectedIndex - 1 + p.results.length) % p.results.length,
         }));
-        return;
       }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        commitSelection(popover.results[popover.selectedIndex]);
-        return;
+    };
+
+    const commitCurrent = () => {
+      if (slashOpen) {
+        const cmd = slashPopover.results[slashPopover.selectedIndex];
+        if (cmd) commitSlashSelection(cmd.name);
+      } else if (mentionOpen) {
+        commitMentionSelection(mentionPopover.results[mentionPopover.selectedIndex]);
       }
-      if (e.key === "Escape") {
+    };
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      moveDown();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      moveUp();
+      return;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      if (slashOpen || mentionOpen) {
         e.preventDefault();
-        setPopover((p) => ({ ...p, open: false }));
+        commitCurrent();
         return;
       }
     }
+    if (e.key === "Escape") {
+      if (slashPopover.open || mentionPopover.open) {
+        e.preventDefault();
+        setSlashPopover((p) => ({ ...p, open: false }));
+        setMentionPopover((p) => ({ ...p, open: false }));
+        return;
+      }
+    }
+
+    // Bug fix A (spec §3.1 Fix A): dismiss mention popover on space immediately.
+    // Fires before the textarea value updates so the popover closes synchronously.
+    if (mentionPopover.open && e.key === " ") {
+      e.preventDefault();
+      setMentionPopover((p) => ({ ...p, open: false }));
+      return;
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -142,16 +265,18 @@ export function MentionInput({
     const re = /@([^\s@]+)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      const path = m[1];
-      mentions.push({ path });
+      mentions.push({ path: m[1] });
     }
     onSend(text, mentions);
     onChange("");
-    setPopover((p) => ({ ...p, open: false }));
+    setMentionPopover((p) => ({ ...p, open: false }));
+    setSlashPopover((p) => ({ ...p, open: false }));
   };
 
   const browseTruncated =
-    !popover.query && popover.results.length < fileTree.length;
+    !mentionPopover.query && mentionPopover.results.length < fileTree.length;
+
+  const activeSlash = slashPopover.open && slashCommands;
 
   return (
     <>
@@ -168,91 +293,77 @@ export function MentionInput({
         className="flex-1 bg-transparent text-[14px] leading-relaxed text-white px-4 py-3 my-1.5 resize-none outline-none placeholder:text-white-30 disabled:opacity-50 disabled:pointer-events-none"
         style={{ minHeight: "44px", maxHeight: "200px", caretColor: "#5bc9ff" }}
       />
-      {popover.open && (
-        <div className="absolute left-0 right-0 bottom-full z-50 glass-mist mention-popover animate-mention-in flex flex-col overflow-hidden">
-          <div className="px-2 py-1 text-[10px] text-white-15 uppercase tracking-wider border-b border-border-subtle flex items-center justify-between">
-            <span>
-              {popover.query
-                ? `Files matching "${popover.query}"`
-                : "Project files"}
-            </span>
-            {!popover.query && (
-              <span className="font-mono normal-case">{fileTree.length}</span>
-            )}
-          </div>
 
-          <div
-            ref={listRef}
-            className="max-h-[min(320px,45vh)] overflow-y-auto overscroll-contain"
-          >
-            {popover.results.length === 0 ? (
-              <div className="px-3 py-3 text-[11px] text-white-30">
-                {popover.query
-                  ? `No files match "${popover.query}"`
-                  : "No files in this project"}
-              </div>
-            ) : (
-              popover.results.map((path, i) => {
-                const isSelected = i === popover.selectedIndex;
-                const slash = path.lastIndexOf("/");
-                const base = slash >= 0 ? path.slice(slash + 1) : path;
-                const dir = slash > 0 ? path.slice(0, slash) : "";
-                return (
-                  <button
-                    key={path}
-                    data-selected={isSelected || undefined}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      commitSelection(path);
-                    }}
-                    onMouseEnter={() =>
-                      setPopover((p) => ({ ...p, selectedIndex: i }))
+      {/* Slash command popover (spec §2 — wins arbitration over mention) */}
+      {activeSlash && slashCommands && (
+        <SlashCommandPopover
+          open={slashPopover.open}
+          query={slashPopover.query}
+          results={slashPopover.results}
+          selectedIndex={slashPopover.selectedIndex}
+          currentModeLabel={slashCommands.currentModeLabel}
+          currentModelLabel={slashCommands.currentModelLabel}
+          onSelect={commitSlashSelection}
+          onDismiss={() => setSlashPopover((p) => ({ ...p, open: false }))}
+          onSelectedIndexChange={(idx) =>
+            setSlashPopover((p) => ({ ...p, selectedIndex: idx }))
+          }
+        />
+      )}
+
+      {/* Mention popover (spec §2.7 — closes when slash is active) */}
+      {!activeSlash && (
+        <ComposerPopover
+          open={mentionPopover.open}
+          query={mentionPopover.query}
+          results={mentionPopover.results}
+          selectedIndex={mentionPopover.selectedIndex}
+          label={mentionPopover.query ? `Files matching "${mentionPopover.query}"` : "Project files"}
+          totalCount={fileTree.length}
+          truncatedCount={fileTree.length - mentionPopover.results.length}
+          renderItem={(path, query, isSelected) => {
+            const slash = path.lastIndexOf("/");
+            const base = slash >= 0 ? path.slice(slash + 1) : path;
+            const dir = slash > 0 ? path.slice(0, slash) : "";
+            return (
+              <div
+                className={`w-full text-left px-3 py-1.5 text-[12px] font-mono flex items-center gap-2 transition-colors ${
+                  isSelected
+                    ? "bg-white/[0.06] text-white"
+                    : "text-white-50 hover:bg-white/[0.03]"
+                }`}
+              >
+                <FileTypeIcon path={path} size={14} className="flex-shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  <HighlightedText
+                    text={
+                      base.toLowerCase().includes(query.toLowerCase())
+                        ? base
+                        : path
                     }
-                    className={`w-full text-left px-3 py-1.5 text-[12px] font-mono flex items-center gap-2 transition-colors ${
-                      isSelected
-                        ? "bg-white/[0.06] text-white"
-                        : "text-white-50 hover:bg-white/[0.03]"
-                    }`}
-                  >
-                    <FileTypeIcon path={path} size={14} className="flex-shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">
-                      <HighlightedText
-                        text={base.toLowerCase().includes(popover.query.toLowerCase())
-                          ? base
-                          : path}
-                        query={popover.query}
-                        selected={isSelected}
-                      />
-                      {dir && (
-                        <span
-                          className={
-                            isSelected ? "text-white-30" : "text-white-15"
-                          }
-                        >
-                          {" "}
-                          · {dir}
-                        </span>
-                      )}
+                    query={query}
+                    selected={isSelected}
+                  />
+                  {dir && (
+                    <span
+                      className={
+                        isSelected ? "text-white-30" : "text-white-15"
+                      }
+                    >
+                      {" "}
+                      · {dir}
                     </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-
-          {popover.results.length > 0 && (
-            <div className="px-2 py-1 border-t border-border-subtle text-[10px] text-white-15 flex items-center justify-between gap-3">
-              <span className="whitespace-nowrap">
-                ↑↓ navigate · Enter select · Esc close
-              </span>
-              {browseTruncated && (
-                <span className="truncate text-right font-mono">
-                  +{fileTree.length - popover.results.length} more — keep typing
+                  )}
                 </span>
-              )}
-            </div>
-          )}
-        </div>
+              </div>
+            );
+          }}
+          onSelect={commitMentionSelection}
+          onDismiss={() => setMentionPopover((p) => ({ ...p, open: false }))}
+          onSelectedIndexChange={(idx) =>
+            setMentionPopover((p) => ({ ...p, selectedIndex: idx }))
+          }
+        />
       )}
     </>
   );

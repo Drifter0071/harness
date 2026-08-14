@@ -41,7 +41,7 @@ export interface Session {
   updatedAt: string;
   agent: import("./ipc").AgentSnapshot;
   goalMode: boolean;
-  actionMode: import("./ipc").ActionMode;
+  commandMode: import("./ipc").CommandMode;
   messages: SessionMessage[];
   activities: import("./ipc").ToolActivity[];
   /** Null until the first assistant response arrives (spec §4.5b). */
@@ -156,8 +156,8 @@ interface HarnessState {
   setSessionMeta: (m: { createdAt: string; updatedAt: string } | null) => void;
 
   // Agent session options (composer options row; persisted with the session)
-  actionMode: import("./ipc").ActionMode;
-  setActionMode: (mode: import("./ipc").ActionMode) => void;
+  commandMode: import("./ipc").CommandMode;
+  setActionMode: (mode: import("./ipc").CommandMode) => void;
   goalMode: boolean;
   setGoalMode: (on: boolean) => void;
   /** requestId of the in-flight agent turn, or null when idle. */
@@ -402,8 +402,8 @@ export const useStore = create<HarnessState>((set) => ({
     })),
   sessionMeta: null,
   setSessionMeta: (m) => set({ sessionMeta: m }),
-  actionMode: "askRisky",
-  setActionMode: (mode) => set({ actionMode: mode }),
+  commandMode: "commands",
+  setActionMode: (mode) => set({ commandMode: mode }),
   goalMode: false,
   setGoalMode: (on) => set({ goalMode: on }),
   agentRequestId: null,

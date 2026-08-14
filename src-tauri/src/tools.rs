@@ -30,7 +30,7 @@ use crate::agent_loop::{
 use crate::llm_client::ToolSpec;
 use crate::models::ReasoningEffort;
 use crate::personalities::{builtin_personality_id, get_personality};
-use crate::session::ActionMode;
+use crate::session::CommandMode;
 
 /// Output cap for tool `content` (model context budget).
 const CONTENT_MAX: usize = 32 * 1024;
@@ -159,7 +159,7 @@ pub struct SubagentDispatchContext {
     /// The workspace the subagent operates in (same as the orchestrator).
     pub workspace: String,
     /// Approval policy the subagent turn runs under.
-    pub action_mode: ActionMode,
+    pub mode: CommandMode,
     /// Reasoning effort forwarded to the subagent's provider call.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Fallback model id: used when the personality has no bound saved
@@ -835,7 +835,7 @@ async fn tool_delegate_subagent(ctx: &ToolContext, args: &Value) -> Result<ToolR
         request_id.clone(),
         resolved,
         task.clone(),
-        dispatch.action_mode.clone(),
+        dispatch.mode.clone(),
         dispatch.workspace.clone(),
         dispatch.sink.clone(),
         dispatch.pending_approvals.clone(),
@@ -1609,6 +1609,25 @@ mod tests {
                 })
             })
         }
+
+        fn complete_with_system_prompt(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _model_id: &str,
+            _cancel_rx: oneshot::Receiver<()>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, AgentTurnError>> + Send>,
+        > {
+            let next = self.script.lock().unwrap().pop_front();
+            Box::pin(async move {
+                match next {
+                    Some(Ok(outcome)) => Ok(outcome.text),
+                    Some(Err(e)) => Err(e),
+                    None => Ok("Summarized conversation.".to_string()),
+                }
+            })
+        }
     }
 
     fn text_outcome(text: &str) -> Result<TurnOutcome, AgentTurnError> {
@@ -1638,7 +1657,7 @@ mod tests {
             in_flight: Arc::new(DashMap::new()),
             sink: sink.clone(),
             workspace: workspace.to_string(),
-            action_mode: ActionMode::Auto,
+            mode: CommandMode::Yolo,
             reasoning_effort: None,
             chat_model_id: "test-model".into(),
             request_id: "parent-1".into(),

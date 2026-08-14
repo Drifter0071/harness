@@ -1,6 +1,7 @@
 mod agent;
 mod agent_loop;
 mod capabilities;
+mod compact;
 mod commands;
 mod hci;
 mod health_agent;
@@ -100,6 +101,9 @@ pub fn run() {
             commands::rename_session,
             commands::delete_session,
             commands::set_active_session,
+            commands::set_session_mode,
+            commands::set_session_model,
+            commands::compact_chat,
             commands::list_recent_projects,
             commands::forget_recent_project,
             commands::touch_recent_project,

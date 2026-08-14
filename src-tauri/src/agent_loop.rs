@@ -33,7 +33,7 @@ use crate::models::ReasoningEffort;
 use crate::personalities::AgentPersonality;
 use crate::secrets::SecretStore;
 use crate::session::{
-    save_session, ActionMode, LastTurn, Message, Session, TokenStats, ToolActivity,
+    save_session, CommandMode, LastTurn, Message, Session, TokenStats, ToolActivity,
     ToolActivityStatus,
 };
 use crate::tools::{execute_tool, SubagentDispatchContext, ToolContext, ToolResult};
@@ -44,8 +44,8 @@ const MAX_ROUNDS: usize = 24;
 /// stall detector after this many rounds.
 const STALL_WINDOW: usize = 3;
 /// Tools that mutate the workspace; everything else is read-only for stall
-/// detection and treated as "safe" under `AskRisky`.
-const RISKY_TOOLS: [&str; 3] = ["write_file", "edit_file", "run_command"];
+/// detection and treated as "safe" under `Commands` mode.
+const MUTATING_TOOLS: [&str; 3] = ["write_file", "edit_file", "run_command"];
 /// Goal-mode continuation marker the model appends to keep working.
 const CONTINUE_MARKER: &str = "[continue]";
 /// Cap on goal-mode continuation turns after the first.
@@ -179,6 +179,16 @@ pub trait TurnCompleter: Send + Sync {
         reasoning_cb: Box<dyn Fn(&str) + Send>,
         cancel_rx: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>>;
+
+    /// Single-shot LLM call for compaction: system prompt + user prompt, no
+    /// tools, no streaming, returns the raw text response (spec §6.7.5).
+    fn complete_with_system_prompt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model_id: &str,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentTurnError>> + Send>>;
 }
 
 /// Production completer backed by `complete_with_tools` (owns the secret
@@ -210,6 +220,31 @@ impl TurnCompleter for LlmClientTurner {
                 secrets.as_ref(),
                 text_cb,
                 reasoning_cb,
+                cancel_rx,
+            )
+            .await
+        })
+    }
+
+    fn complete_with_system_prompt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model_id: &str,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentTurnError>> + Send>> {
+        let secrets = Arc::clone(&self.secrets);
+        // Clone strings so the async block owns the data and the returned
+        // future is valid for 'static (no borrowed references).
+        let system_prompt = system_prompt.to_string();
+        let user_prompt = user_prompt.to_string();
+        let model_id = model_id.to_string();
+        Box::pin(async move {
+            crate::llm_client::complete_simple(
+                &system_prompt,
+                &user_prompt,
+                &model_id,
+                secrets.as_ref(),
                 cancel_rx,
             )
             .await
@@ -261,32 +296,38 @@ impl Drop for PendingApprovalGuard {
 
 // -- Policy gate --
 
-fn requires_approval(action_mode: &ActionMode, name: &str) -> bool {
-    match action_mode {
-        ActionMode::Auto => false,
-        ActionMode::AskRisky => RISKY_TOOLS.contains(&name),
-        ActionMode::AskAll => true,
+fn requires_approval(mode: &CommandMode, name: &str) -> bool {
+    match mode {
+        CommandMode::Commands => name == "run_command",
+        CommandMode::Yolo => false,
     }
 }
 
 /// True when a tool mutates the workspace; used for stall detection.
 fn is_mutating(name: &str) -> bool {
-    RISKY_TOOLS.contains(&name)
+    MUTATING_TOOLS.contains(&name)
 }
 
 // -- History conversion --
 
 /// Rebuild the provider history from persisted session messages. Tool-granular
 /// `role:"tool"` records are not persisted (they live in `activities`), so a
-/// fresh turn replays user/assistant text only â€” the assistant summary carries
+/// fresh turn replays user/assistant text only â€" the assistant summary carries
 /// the state across turns. Within a turn, the loop keeps the full
 /// assistant-echo + tool-result sequence in `messages` so OpenAI accepts
 /// multi-round tool use.
+///
+/// Summary messages (`role == "system" && kind == "summary"`) are included so
+/// the agent can see the pre-compacted context after a `/compact` operation.
 fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
     session
         .messages
         .iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
+        .filter(|m| {
+            m.role == "user"
+                || m.role == "assistant"
+                || (m.role == "system" && m.kind.as_deref() == Some("summary"))
+        })
         .map(|m| ToolChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
@@ -366,6 +407,8 @@ fn user_message(session: &mut Session, text: &str) {
         agent_id: None,
         agent_name: None,
         reasoning: None,
+        kind: None,
+        compact_meta: None,
     });
 }
 
@@ -404,6 +447,8 @@ fn assistant_message_with_id_and_reasoning(
         agent_id: Some(resolved.personality_id.clone()),
         agent_name: Some(resolved.name.clone()),
         reasoning,
+        kind: None,
+        compact_meta: None,
     };
     if let Some(existing) = session.messages.iter_mut().find(|m| m.id == id) {
         *existing = msg;
@@ -524,7 +569,7 @@ pub fn run_agent_turn(
     session: Session,
     model_id: String,
     message_text: String,
-    action_mode: ActionMode,
+    mode: CommandMode,
     goal_mode: bool,
     workspace: String,
     sink: Arc<dyn AgentEventSink>,
@@ -539,7 +584,7 @@ pub fn run_agent_turn(
         session,
         model_id,
         message_text,
-        action_mode,
+        mode,
         goal_mode,
         workspace,
         sink,
@@ -624,7 +669,7 @@ async fn run_agent_turn_inner(
     mut session: Session,
     chat_model_id: String,
     message_text: String,
-    action_mode: ActionMode,
+    mode: CommandMode,
     goal_mode: bool,
     workspace: String,
     sink: Arc<dyn AgentEventSink>,
@@ -645,7 +690,7 @@ async fn run_agent_turn_inner(
         &mut session,
         &resolved,
         &message_text,
-        &action_mode,
+        &mode,
         goal_mode,
         &workspace,
         &sink,
@@ -746,7 +791,7 @@ pub fn run_subagent_turn(
     request_id: String,
     resolved: ResolvedAgent,
     task: String,
-    action_mode: ActionMode,
+    mode: CommandMode,
     workspace: String,
     sink: Arc<dyn AgentEventSink>,
     pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
@@ -759,7 +804,7 @@ pub fn run_subagent_turn(
         request_id,
         resolved,
         task,
-        action_mode,
+        mode,
         workspace,
         sink,
         pending_approvals,
@@ -775,7 +820,7 @@ async fn run_subagent_turn_inner(
     request_id: String,
     resolved: ResolvedAgent,
     task: String,
-    action_mode: ActionMode,
+    mode: CommandMode,
     workspace: String,
     sink: Arc<dyn AgentEventSink>,
     pending_approvals: Arc<DashMap<String, oneshot::Sender<bool>>>,
@@ -797,11 +842,15 @@ async fn run_subagent_turn_inner(
         updated_at: now_iso(),
         agent: crate::session::default_agent_snapshot(),
         goal_mode: false,
-        action_mode: action_mode.clone(),
+        last_mode: mode.clone(),
+        last_model_id: None,
+        action_mode_legacy: None,
         messages: Vec::new(),
         activities: Vec::new(),
         token_stats: None,
         last_turn: None,
+        compact: None,
+        compact_threshold: 0.8,
     };
 
     let outcome = run_turn_core(
@@ -809,7 +858,7 @@ async fn run_subagent_turn_inner(
         &mut session,
         &resolved,
         &task,
-        &action_mode,
+        &mode,
         false,
         &workspace,
         &sink,
@@ -839,7 +888,7 @@ async fn run_turn_core(
     session: &mut Session,
     resolved: &ResolvedAgent,
     message_text: &str,
-    action_mode: &ActionMode,
+    mode: &CommandMode,
     goal_mode: bool,
     workspace: &str,
     sink: &Arc<dyn AgentEventSink>,
@@ -847,7 +896,7 @@ async fn run_turn_core(
     in_flight: &Arc<DashMap<String, watch::Sender<bool>>>,
     completer: &dyn TurnCompleter,
     reasoning_effort: Option<ReasoningEffort>,
-    mode: PersistMode,
+    persist_mode: PersistMode,
     dispatch: Option<&SubagentDispatchContext>,
 ) -> Result<TurnFinish, ()> {
     let (cancel_tx, mut cancel_rx) = new_cancel_token();
@@ -859,7 +908,7 @@ async fn run_turn_core(
     // terminal event.
     if session.last_turn.is_some() {
         session.last_turn = None;
-        persist(session, mode).await;
+        persist(session, persist_mode).await;
     }
 
     // Subagent turns (anything but the Orchestrator) attach their
@@ -936,7 +985,7 @@ async fn run_turn_core(
                 "loop_cap",
                 "Agent turn exceeded the maximum number of LLM rounds",
                 Some(request_id),
-                mode,
+                persist_mode,
             )
             .await);
         }
@@ -1016,7 +1065,7 @@ async fn run_turn_core(
                 Ok(o) => o,
                 Err(e) => {
                     let (kind, msg) = error_vocab(&e);
-                    return Ok(finish_error(session, kind, msg, Some(request_id), mode).await);
+                    return Ok(finish_error(session, kind, msg, Some(request_id), persist_mode).await);
                 }
             }
         };
@@ -1044,7 +1093,7 @@ async fn run_turn_core(
             resolved,
         );
         merge_usage(&mut session.token_stats, &outcome.usage);
-        persist(session, mode).await;
+        persist(session, persist_mode).await;
 
         // -- Execute requested tool calls --
         if !outcome.tool_calls.is_empty() {
@@ -1058,7 +1107,7 @@ async fn run_turn_core(
                 let allowed = gate_tool(
                     request_id,
                     session,
-                    action_mode,
+                    mode, // &CommandMode (the shadowed PersistMode is named persist_mode)
                     call,
                     &mut messages,
                     sink,
@@ -1078,7 +1127,7 @@ async fn run_turn_core(
                     &mut messages,
                     sink,
                     &mut stall_ring,
-                    mode,
+                    persist_mode,
                     dispatch,
                 )
                 .await;
@@ -1089,7 +1138,7 @@ async fn run_turn_core(
                     "stalled",
                     format!("Agent repeated the same {} call without effect", name),
                     Some(request_id),
-                    mode,
+                    persist_mode,
                 )
                 .await);
             }
@@ -1105,7 +1154,7 @@ async fn run_turn_core(
                     "loop_cap",
                     "Goal loop exceeded the maximum number of continuation turns",
                     Some(request_id),
-                    mode,
+                    persist_mode,
                 )
                 .await);
             }
@@ -1124,7 +1173,7 @@ async fn run_turn_core(
         // file reflects completion even if the in-process Tauri event never
         // reaches the WebView.
         let reasoning = (!outcome.reasoning.is_empty()).then(|| outcome.reasoning.clone());
-        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning, mode).await;
+        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning, persist_mode).await;
         return Ok(TurnFinish::Done {
             content: final_text,
             reasoning: outcome.reasoning,
@@ -1184,14 +1233,14 @@ async fn finish_error(
 async fn gate_tool(
     request_id: &str,
     session: &mut Session,
-    action_mode: &ActionMode,
+    mode: &CommandMode,
     call: &ToolCall,
     messages: &mut Vec<ToolChatMessage>,
     sink: &Arc<dyn AgentEventSink>,
     pending_approvals: &Arc<DashMap<String, oneshot::Sender<bool>>>,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<bool, ()> {
-    if !requires_approval(action_mode, &call.name) {
+    if !requires_approval(mode, &call.name) {
         return Ok(true);
     }
 
@@ -1408,6 +1457,24 @@ mod tests {
                 })
             })
         }
+
+        fn complete_with_system_prompt(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _model_id: &str,
+            _cancel_rx: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<String, AgentTurnError>> + Send>> {
+            // Returns the canned summary from the script if set, else a default.
+            let next = self.script.lock().unwrap().pop_front();
+            Box::pin(async move {
+                match next {
+                    Some(Ok(outcome)) => Ok(outcome.text),
+                    Some(Err(e)) => Err(e),
+                    None => Ok("Summarized conversation.".to_string()),
+                }
+            })
+        }
     }
 
     #[derive(Default)]
@@ -1444,11 +1511,15 @@ mod tests {
             updated_at: now_iso(),
             agent: crate::session::default_agent_snapshot(),
             goal_mode: false,
-            action_mode: ActionMode::AskRisky,
+            last_mode: CommandMode::Commands,
+            last_model_id: None,
+            action_mode_legacy: None,
             messages: Vec::new(),
             activities: Vec::new(),
             token_stats: None,
             last_turn: None,
+            compact: None,
+            compact_threshold: 0.8,
         }
     }
 
@@ -1480,7 +1551,7 @@ mod tests {
         rig: &mut Rig,
         completer: Arc<MockCompleter>,
         message: &str,
-        action_mode: ActionMode,
+        mode: CommandMode,
         goal_mode: bool,
     ) -> Session {
         let workspace = rig.session.project_path.clone();
@@ -1491,7 +1562,7 @@ mod tests {
             rig.session.clone(),
             "test-model".into(),
             message.to_string(),
-            action_mode,
+            mode,
             goal_mode,
             workspace,
             sink,
@@ -1529,7 +1600,7 @@ mod tests {
             &mut rig,
             completer.clone(),
             "do the work",
-            ActionMode::Auto,
+            CommandMode::Yolo,
             true,
         )
         .await;
@@ -1560,7 +1631,7 @@ mod tests {
             .collect();
         let completer = Arc::new(MockCompleter::new(script));
         let mut rig = rig();
-        run(&mut rig, completer, "keep going", ActionMode::Auto, true).await;
+        run(&mut rig, completer, "keep going", CommandMode::Yolo, true).await;
 
         let errors = probe(&rig.sink, "agent-error");
         assert_eq!(errors.len(), 1);
@@ -1590,7 +1661,7 @@ mod tests {
             &mut rig,
             completer.clone(),
             "look around",
-            ActionMode::Auto,
+            CommandMode::Yolo,
             false,
         )
         .await;
@@ -1654,7 +1725,7 @@ mod tests {
             &mut rig,
             completer.clone(),
             "write a file",
-            ActionMode::AskRisky,
+            CommandMode::Commands,
             false,
         )
         .await;
@@ -1701,7 +1772,7 @@ mod tests {
             &mut rig,
             completer,
             "read the file",
-            ActionMode::Auto,
+            CommandMode::Yolo,
             false,
         )
         .await;
@@ -1747,7 +1818,7 @@ mod tests {
             &mut rig,
             completer,
             "write a file",
-            ActionMode::AskAll,
+            CommandMode::Commands,
             false,
         )
         .await;
@@ -1786,7 +1857,7 @@ mod tests {
             in_flight: Arc::new(DashMap::new()),
             sink: sink.clone(),
             workspace: workspace.to_string(),
-            action_mode: ActionMode::Auto,
+            mode: crate::session::CommandMode::Yolo,
             reasoning_effort: None,
             chat_model_id: "test-model".into(),
             request_id: "parent-1".into(),
@@ -1808,7 +1879,7 @@ mod tests {
             "sub-1".into(),
             resolved,
             "do the thing".into(),
-            ActionMode::Auto,
+            CommandMode::Yolo,
             workspace.clone(),
             sink.clone(),
             pending,
@@ -1857,7 +1928,7 @@ mod tests {
             "sub-1".into(),
             resolved,
             "task".into(),
-            ActionMode::Auto,
+            CommandMode::Yolo,
             workspace,
             sink,
             dispatch.pending_approvals.clone(),

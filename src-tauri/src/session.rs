@@ -42,6 +42,13 @@ pub struct Message {
     /// this in a collapsible "Thinking" block above the message body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Kind discriminator for special message types (spec §6.1).
+    /// `"summary"` — a compacted summary inserted by `/compact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Metadata for compacted summary messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_meta: Option<CompactMeta>,
 }
 
 /// Per-session token telemetry (spec §4.5). `null` until the first
@@ -61,15 +68,68 @@ pub struct TokenStats {
     pub session_window_resets_at: Option<String>,
 }
 
-/// Action policy for agent tool calls (spec §5). Serialized camelCase:
-/// `"auto" | "askRisky" | "askAll"`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// Metadata attached to a compacted summary message (spec §6.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ActionMode {
-    Auto,
+pub struct CompactMeta {
+    pub original_count: usize,
+    pub token_estimate: usize,
+    /// IDs of the original messages that the summary replaced.
+    pub folded_message_ids: Vec<String>,
+    /// ISO 8601 UTC string.
+    pub compacted_at: String,
+}
+
+/// State of the last compaction on a session (spec §5.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactState {
+    /// ISO 8601 UTC string.
+    pub compacted_at: String,
+    /// ID of the summary message inserted by the compaction.
+    pub summary_message_id: String,
+    pub original_count: usize,
+    pub token_estimate_before: usize,
+    pub token_estimate_after: usize,
+}
+
+/// Command policy for agent tool calls (spec §4). Serialized camelCase:
+/// `"commands" | "yolo"`. Migration: old `"auto" | "askRisky" | "askAll"`
+/// values are accepted via `FromStr`-style matching and remapped.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CommandMode {
+    /// Ask for approval before `run_command`. All other tools fire silently.
+    Commands,
+    /// Run all tools without asking.
     #[default]
-    AskRisky,
-    AskAll,
+    Yolo,
+}
+
+impl serde::Serialize for CommandMode {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            CommandMode::Commands => s.serialize_str("commands"),
+            CommandMode::Yolo => s.serialize_str("yolo"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CommandMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        // Accept canonical names and legacy wire-format names.
+        match raw.as_str() {
+            "commands" => Ok(CommandMode::Commands),
+            "yolo" => Ok(CommandMode::Yolo),
+            // Legacy migration: §4.3.
+            "auto" => Ok(CommandMode::Yolo),
+            "askRisky" => Ok(CommandMode::Commands),
+            "askAll" => Ok(CommandMode::Commands),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown CommandMode value: {raw}"
+            ))),
+        }
+    }
 }
 
 /// One persisted tool-execution record (spec §4.1 `activities`).
@@ -166,6 +226,25 @@ pub struct LastTurn {
     pub reasoning: Option<String>,
 }
 
+/// Normalize a deserialized session, applying the `actionMode` → `lastMode`
+/// migration when needed. Call this after every `load_session`.
+impl Session {
+    pub fn normalize(&mut self) {
+        if let Some(ref raw) = self.action_mode_legacy {
+            self.last_mode = match raw.as_str() {
+                "auto" => CommandMode::Yolo,
+                "askRisky" => CommandMode::Commands,
+                "askAll" => CommandMode::Commands,
+                // Canonical names: no-op.
+                "commands" => CommandMode::Commands,
+                "yolo" => CommandMode::Yolo,
+                _ => CommandMode::Commands, // Unknown → safe default.
+            };
+        }
+        self.action_mode_legacy = None;
+    }
+}
+
 /// Session wire format v2 — one self-contained file per session under
 /// `<project>/.harness/sessions/<id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,8 +265,17 @@ pub struct Session {
     pub agent: AgentSnapshot,
     #[serde(default)]
     pub goal_mode: bool,
+    /// The persisted command mode (spec §5.1). Serialized as `lastMode`.
+    /// Legacy session files with `actionMode` are also accepted and remapped.
     #[serde(default)]
-    pub action_mode: ActionMode,
+    pub last_mode: CommandMode,
+    /// Legacy field name for the command mode. Serde reads this when `lastMode`
+    /// is absent (old session files), and the conversion happens in `Session::new`.
+    #[serde(default, skip_serializing, rename = "actionMode")]
+    pub(crate) action_mode_legacy: Option<String>,
+    /// ID of the last-used model for this session (spec §5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_model_id: Option<String>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub activities: Vec<ToolActivity>,
@@ -196,6 +284,12 @@ pub struct Session {
     /// Completed-turn marker from the agent loop (see [`LastTurn`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn: Option<LastTurn>,
+    /// State of the last compaction (spec §5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact: Option<CompactState>,
+    /// Token-fill fraction above which auto-compact fires (spec §6.4). 0.0–1.0.
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f32,
 }
 
 fn default_version() -> u32 {
@@ -204,6 +298,14 @@ fn default_version() -> u32 {
 
 pub fn default_agent_snapshot() -> AgentSnapshot {
     AgentSnapshot::default()
+}
+
+pub fn default_command_mode() -> CommandMode {
+    CommandMode::default()
+}
+
+fn default_compact_threshold() -> f32 {
+    0.8
 }
 
 /// Load the live subagent personalities roster (read-only) so the
@@ -450,11 +552,15 @@ pub async fn create_session(
         updated_at: now,
         agent,
         goal_mode: false,
-        action_mode: ActionMode::AskRisky,
+        last_mode: CommandMode::default(),
+        last_model_id: None,
+        action_mode_legacy: None,
         messages: Vec::new(),
         activities: Vec::new(),
         token_stats: None,
         last_turn: None,
+        compact: None,
+        compact_threshold: 0.8,
     };
     write_session_atomic(&dir, &session).await?;
     set_active_session(project_path, &id).await?;
@@ -478,7 +584,7 @@ pub async fn load_session(project_path: &str, id: &str) -> Result<Option<Session
         }
     };
     match serde_json::from_str::<Session>(&raw) {
-        Ok(s) => {
+        Ok(mut s) => {
             if s.version != 2 {
                 eprintln!(
                     "[harness] session {} has unknown version {}; archiving",
@@ -487,6 +593,7 @@ pub async fn load_session(project_path: &str, id: &str) -> Result<Option<Session
                 archive_session_file(&path, s.version).await;
                 return Ok(None);
             }
+            s.normalize();
             Ok(Some(s))
         }
         Err(e) => {
@@ -663,11 +770,15 @@ pub async fn migrate_v1_if_needed(project_path: &str) -> Result<Option<String>, 
         updated_at: now_iso(),
         agent: default_agent_snapshot(),
         goal_mode: false,
-        action_mode: ActionMode::AskRisky,
+        last_mode: CommandMode::default(),
+        last_model_id: None,
+        action_mode_legacy: None,
         messages: v1.messages,
         activities: Vec::new(),
         token_stats: v1.token_stats,
         last_turn: None,
+        compact: None,
+        compact_threshold: 0.8,
     };
     derive_title(&mut session);
     let dir = ensure_sessions_dir(project_path).await?;
@@ -861,7 +972,9 @@ mod tests {
             updated_at: iso_now(),
             agent: default_agent_snapshot(),
             goal_mode: false,
-            action_mode: ActionMode::AskRisky,
+            last_mode: CommandMode::default(),
+            last_model_id: None,
+            action_mode_legacy: None,
             messages: vec![Message {
                 id: "m1".into(),
                 role: "user".into(),
@@ -871,6 +984,8 @@ mod tests {
                 agent_id: None,
                 agent_name: None,
                 reasoning: None,
+                kind: None,
+                compact_meta: None,
             }],
             activities: vec![ToolActivity {
                 id: "act1".into(),
@@ -890,6 +1005,8 @@ mod tests {
                 session_window_resets_at: Some("2026-08-12T00:00:00Z".into()),
             }),
             last_turn: None,
+            compact: None,
+            compact_threshold: 0.8,
         }
     }
 
@@ -1173,6 +1290,139 @@ mod tests {
         );
     }
 
+    // ── CommandMode migration tests (spec §4.3) ──────────────────────────────────
+
+    #[test]
+    fn migration_action_mode_auto_loads_as_yolo() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "actionMode": "auto",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_mode, CommandMode::Yolo);
+    }
+
+    #[test]
+    fn migration_action_mode_ask_risky_loads_as_commands() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "actionMode": "askRisky",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_mode, CommandMode::Commands);
+    }
+
+    #[test]
+    fn migration_action_mode_ask_all_loads_as_commands() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "actionMode": "askAll",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_mode, CommandMode::Commands);
+    }
+
+    #[test]
+    fn migration_missing_action_mode_defaults_to_commands() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_mode, CommandMode::Commands);
+    }
+
+    #[test]
+    fn migration_old_session_without_last_model_id_loads_with_none() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_model_id, None);
+    }
+
+    #[test]
+    fn migration_canonical_last_mode_loads_correctly() {
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "lastMode": "yolo",
+            "lastModelId": "gpt-4o",
+            "messages": []
+        });
+        let mut s: Session = serde_json::from_value(json).unwrap();
+        s.normalize();
+        assert_eq!(s.last_mode, CommandMode::Yolo);
+        assert_eq!(s.last_model_id, Some("gpt-4o".to_string()));
+    }
+
+    #[tokio::test]
+    async fn migration_save_writes_only_last_mode() {
+        // Load a legacy-format session, save it, verify the output has
+        // lastMode but NOT actionMode.
+        let json = serde_json::json!({
+            "version": 2,
+            "projectPath": "/p",
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+            "actionMode": "askRisky",
+            "messages": [
+                { "id": "m1", "role": "user", "content": "hi", "timestamp": "2026-08-11T00:00:00Z" }
+            ]
+        });
+        let s: Session = serde_json::from_value(json).unwrap();
+        assert_eq!(s.last_mode, CommandMode::Commands);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let saved = save_session(&path, s).await.unwrap();
+
+        let disk = std::fs::read_to_string(
+            std::path::Path::new(&path)
+                .join(".harness")
+                .join("sessions")
+                .join(format!("{}.json", saved.id)),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&disk).unwrap();
+        assert!(
+            parsed.get("lastMode").is_some(),
+            "expected lastMode in saved JSON: {}",
+            disk
+        );
+        assert!(
+            parsed.get("actionMode").is_none(),
+            "expected no actionMode in saved JSON: {}",
+            disk
+        );
+    }
+
     #[test]
     fn session_id_validation() {
         assert!(validate_session_id("9f2c5c6e-1234-4a5b-8c9d-abcdef012345").is_ok());
@@ -1276,8 +1526,8 @@ mod tests {
             json
         );
         assert!(
-            json.contains("\"actionMode\""),
-            "expected actionMode in {}",
+            json.contains("\"lastMode\""),
+            "expected lastMode in {}",
             json
         );
         assert!(
@@ -1303,6 +1553,11 @@ mod tests {
         );
         assert!(
             !json.contains("\"action_mode\""),
+            "snake_case leaked: {}",
+            json
+        );
+        assert!(
+            !json.contains("\"last_mode\""),
             "snake_case leaked: {}",
             json
         );

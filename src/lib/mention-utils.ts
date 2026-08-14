@@ -11,8 +11,9 @@ const SAFE_URL_SCHEMES = new Set(["https:", "data:", "mailto:", "tel:"]);
  * Rules (matches spec §8.1, §8.2):
  *   - The mention is "active" when the caret is preceded by `@` and the
  *     character before that is whitespace or start-of-string.
- *   - The query runs from `@` to the caret, stopping at whitespace,
- *     newline, or another `@`.
+ *   - The query runs from `@` to the caret, stopping at another `@`.
+ *   - If the text between `@` and the caret contains whitespace, the
+ *     mention is **inactive** (the token ended — user typed past it).
  */
 export function parseMentionQuery(text: string, caret: number): ParsedMention {
   if (caret < 1) return { active: false, query: "" };
@@ -25,10 +26,10 @@ export function parseMentionQuery(text: string, caret: number): ParsedMention {
   // Walk back to find any other @ between the trigger and caret.
   const between = text.slice(at + 1, caret);
   if (between.includes("@")) return { active: false, query: "" };
-  // Stop at whitespace or newline within the query itself.
-  const stopMatch = between.match(/[\s\n]/);
-  const query = stopMatch ? between.slice(0, stopMatch.index) : between;
-  return { active: true, query };
+  // If there's any whitespace in the between text, the mention token has
+  // ended — the popover must close immediately so it doesn't flash.
+  if (/[\s\n]/.test(between)) return { active: false, query: "" };
+  return { active: true, query: between };
 }
 
 export type RankedResult = string;
@@ -40,21 +41,10 @@ export const MENTION_BROWSE_LIMIT = 120;
 export const MENTION_MATCH_LIMIT = 10;
 
 /**
- * Rank mention candidates by relevance to the query.
- *
- * Empty query → the full candidate list (capped at MENTION_BROWSE_LIMIT),
- * in original order — this is what makes bare `@` open a browsable list.
- *
- * Non-empty query, tiers highest-first:
- *   6  full path starts-with the query (only when the query contains `/`,
- *      so `src/au` pins down `src/auth/login.ts`)
- *   4  filename (basename) starts-with the query
- *   3  filename contains the query
- *   2  full path contains the query
- *   1  simple fuzzy match — every query char appears in order in the
- *      filename
+ * Pure ranking — the single source of truth for result order.
+ * Used by tests and as the underlying engine for the throttled variant.
  */
-export function rankMentionResults(query: string, candidates: string[]): RankedResult[] {
+function rankMentionResultsRaw(query: string, candidates: string[]): RankedResult[] {
   if (!query) return candidates.slice(0, MENTION_BROWSE_LIMIT);
   const q = query.toLowerCase();
   const pathPrefixQuery = q.includes("/");
@@ -83,6 +73,39 @@ export function rankMentionResults(query: string, candidates: string[]): RankedR
 
   scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
   return scored.slice(0, MENTION_MATCH_LIMIT).map((s) => s.path);
+}
+
+/** Alias so existing callers (tests) keep working. */
+export const rankMentionResults = rankMentionResultsRaw;
+
+// ── RAF throttle ───────────────────────────────────────────────────────────────
+
+/**
+ * 1-frame RAF gate so a fast typist cannot queue multiple rank calls per
+ * keystroke. The pending job is discarded on every new call so only the
+ * latest query fires once the frame ticks.
+ */
+let _rafHandle = 0;
+let _pendingQuery = "";
+let _pendingCandidates: string[] = [];
+let _pendingResolve: ((r: RankedResult[]) => void) | null = null;
+
+export function rankMentionResultsThrottled(
+  query: string,
+  candidates: string[],
+  onResult: (r: RankedResult[]) => void,
+) {
+  // Cancel any in-flight RAF so a stale job never runs.
+  if (_rafHandle !== 0) cancelAnimationFrame(_rafHandle);
+  _pendingQuery = query;
+  _pendingCandidates = candidates;
+  _pendingResolve = onResult;
+  _rafHandle = requestAnimationFrame(() => {
+    _rafHandle = 0;
+    const resolve = _pendingResolve!;
+    _pendingResolve = null;
+    resolve(rankMentionResultsRaw(_pendingQuery, _pendingCandidates));
+  });
 }
 
 function fuzzyMatch(text: string, q: string): boolean {

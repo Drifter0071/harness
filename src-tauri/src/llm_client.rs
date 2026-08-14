@@ -1139,6 +1139,142 @@ pub async fn complete_with_tools(
     }
 }
 
+// -- Simple non-streaming completion for compaction --
+
+/// Non-streaming LLM call for the compactor. Sends a system + user prompt
+/// and returns the assistant text. No tools, no reasoning callbacks.
+pub async fn complete_simple(
+    system_prompt: &str,
+    user_prompt: &str,
+    model_id: &str,
+    secrets: &dyn SecretStore,
+    cancel_rx: oneshot::Receiver<()>,
+) -> Result<String, AgentTurnError> {
+    let resolved = resolve(secrets, model_id).await.map_err(|e| {
+        if e.contains("No API key") {
+            AgentTurnError::Auth(e)
+        } else {
+            AgentTurnError::Internal(e)
+        }
+    })?;
+
+    match resolved.record.format.as_str() {
+        "openai-chat-completions" => {
+            run_openai_simple(&resolved, system_prompt, user_prompt, cancel_rx).await
+        }
+        "anthropic-messages" => {
+            run_anthropic_simple(&resolved, system_prompt, user_prompt, cancel_rx).await
+        }
+        other => Err(AgentTurnError::BadRequest(format!(
+            "Compact not supported for format: {}",
+            other
+        ))),
+    }
+}
+
+async fn run_openai_simple(
+    resolved: &ResolvedModel,
+    system_prompt: &str,
+    user_prompt: &str,
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> Result<String, AgentTurnError> {
+    let client = build_client().map_err(AgentTurnError::Internal)?;
+    let url = format!("{}/chat/completions", resolved.base_url);
+
+    let body = serde_json::json!({
+        "model": resolved.record.model_name,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ],
+        "stream": false
+    });
+
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", resolved.api_key))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AgentTurnError::Internal(format!("request failed: {}", e)))?;
+
+    // Check cancellation before parsing.
+    if cancel_rx.try_recv().is_ok() {
+        return Err(AgentTurnError::Cancelled);
+    }
+
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(status_to_agent_error(status.as_u16(), &body_text, &headers));
+    }
+
+    let parsed: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AgentTurnError::Internal(format!("failed to parse response: {}", e)))?;
+
+    let content = parsed["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    Ok(content)
+}
+
+async fn run_anthropic_simple(
+    resolved: &ResolvedModel,
+    system_prompt: &str,
+    user_prompt: &str,
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> Result<String, AgentTurnError> {
+    let client = build_client().map_err(AgentTurnError::Internal)?;
+    let url = format!("{}/v1/messages", resolved.base_url);
+
+    let body = serde_json::json!({
+        "model": resolved.record.model_name,
+        "max_tokens": 1024,
+        "system": system_prompt,
+        "messages": [{ "role": "user", "content": user_prompt }]
+    });
+
+    let resp = client
+        .post(&url)
+        .header("x-api-key", &resolved.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AgentTurnError::Internal(format!("request failed: {}", e)))?;
+
+    // Check cancellation before parsing.
+    if cancel_rx.try_recv().is_ok() {
+        return Err(AgentTurnError::Cancelled);
+    }
+
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(status_to_agent_error(status.as_u16(), &body_text, &headers));
+    }
+
+    let parsed: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AgentTurnError::Internal(format!("failed to parse response: {}", e)))?;
+
+    let content = parsed["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    Ok(content)
+}
+
 async fn run_openai_tools(
     request: &ToolChatRequest,
     tools: &[ToolSpec],

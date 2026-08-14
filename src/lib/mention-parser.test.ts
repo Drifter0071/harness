@@ -16,11 +16,20 @@ describe("parseMentionQuery", () => {
   });
 
   it("stops at the first whitespace or newline", () => {
+    // When the space comes after the caret range (caret=26, space is at 27),
+    // between is clean — the mention is still active.
     expect(parseMentionQuery("Explain @src/auth/login.ts please", 26)).toEqual({
       active: true,
       query: "src/auth/login.ts",
     });
+    // Newline inside the query: caret before the \n, so between is clean → active.
     expect(parseMentionQuery("Explain @foo\nbar", 12)).toEqual({ active: true, query: "foo" });
+  });
+
+  // Bug fix (spec §3.1 Fix B): whitespace in the query means the token ended.
+  // Caret=5 includes the trailing space in between.
+  it("returns inactive when space appears mid-token", () => {
+    expect(parseMentionQuery("@foo ", 5)).toEqual({ active: false, query: "" });
   });
 
   it("treats a second @ inside the query as a hard boundary", () => {
