@@ -1,13 +1,16 @@
 # Composer v2 — Slash Commands, CommandMode, Per-Session Memory, Compacting
 
 **Date:** 2026-08-14
-**Status:** Draft (pending review)
+**Status:** Draft v1.2 (pending re-review iteration 3)
 **Author:** Mavis (brainstorming session with @gellert)
 
 > **Revision history:**
-> - v1 (this doc) — initial draft, **FAIL** on first spec-review (17 issues).
->   Fixes in progress: see the [Changelog of reviewer fixes](#changelog-of-reviewer-fixes)
->   appendix at the bottom.
+> - v1 — initial draft, **FAIL** on first spec-review (17 issues).
+> - v1.1 — fixed 15/17; remaining 2 were acknowledged (naming, fix-and-test
+>   pair). Spec review returned **FAIL** with 10 new findings (3 P0).
+> - v1.2 (this doc) — fixes the v1.1 findings. See
+>   [Changelog of reviewer fixes](#appendix-a-changelog-of-reviewer-fixes-v1--v11)
+>   appendix.
 
 ## Summary
 
@@ -55,14 +58,22 @@ three PRs** that build on each other in dependency order:
 
 | PR | Concerns | New files | Modified files | Risks |
 |----|----------|-----------|----------------|-------|
-| **PR1 — `ComposerPopover` refactor + G5 fix** | G5 only | `src/components/ComposerPopover.tsx` | `src/components/MentionInput.tsx`, `src/lib/mention-utils.ts`, `src/lib/mention-utils.test.ts` | Refactor risk (existing mention popover behavior must be unchanged) |
+| **PR1 — `ComposerPopover` refactor + G5 fix** | G5 only | `src/components/ComposerPopover.tsx`, `MentionInput.test.tsx` | `src/components/MentionInput.tsx`, `src/lib/mention-utils.ts`, `src/lib/mention-parser.test.ts` (existing) | Refactor risk (existing mention popover behavior must be unchanged) |
 | **PR2 — Slash commands (G1)** | G1 only | `src/lib/commands.ts`, `src/lib/commands.test.ts`, `src/components/SlashCommandPopover.tsx` | `src/components/Chat.tsx`, `src/components/MentionInput.tsx` (uses primitive from PR1) | New feature, no breaking changes |
-| **PR3 — Mode rename + per-session + compacting (G2, G3, G4)** | G2 + G3 + G4 | (no new top-level files; all changes inside existing modules) | `src-tauri/src/session.rs`, `src-tauri/src/agent_loop.rs`, `src-tauri/src/llm_client.rs`, `src-tauri/src/commands.rs`, `src/lib/ipc.ts`, `src/lib/store.ts`, `src/lib/session-manager.ts`, `src/components/Chat.tsx`, `src/components/Sidebar.tsx` | Migration risk; new persistence fields |
+| **PR3 — Mode rename + per-session + compacting (G2, G3, G4)** | G2 + G3 + G4 | `src-tauri/src/compact.rs` | `src-tauri/src/session.rs`, `src-tauri/src/agent_loop.rs`, `src-tauri/src/llm_client.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/tools.rs`, `src/lib/ipc.ts`, `src/lib/store.ts`, `src/lib/session-manager.ts`, `src/components/Chat.tsx`, `src/components/Sidebar.tsx`, `src/components/MessageRenderer.tsx`, `src/lib/chat-errors.ts`, **plus `src/lib/commands.ts` (PR2's new file — registers `/compact`)** | Migration risk; new persistence fields |
 
-PR1 is the foundation — it extracts the shared popover primitive and fixes
-the G5 bugs as part of the same refactor (the bugs are in the shared
-dismissal logic). PR2 builds on PR1. PR3 is independent of PR1/PR2 except
-for sharing the composer surface.
+**Dependency order** (correction from v1.1 review: PR3 is NOT
+independent of PR2):
+
+- **PR1** lands first. No dependencies.
+- **PR2** depends on PR1's `ComposerPopover` primitive. PR1 must be
+  merged (or at least the `ComposerPopover` component must exist on
+  the branch PR2 is based on) before PR2 can land.
+- **PR3** depends on PR2's `src/lib/commands.ts` to register the
+  `/compact` command. PR2 must be merged before PR3 can land.
+- **PR3 also touches `src/components/Chat.tsx`** which PR2 also
+  modifies. The two PRs are sequenced (PR2 → PR3), so the conflict
+  resolves to "PR2's changes are the base, PR3's are additive."
 
 The remainder of this spec describes PR1+PR2+PR3 in order. Each section
 labels which PR it belongs to. **A reader who only wants to review PR1
@@ -324,11 +335,17 @@ per keystroke.
 
 ### 3.3 Tests (PR1)
 
-In `src/lib/mention-utils.test.ts` (new file; not currently present per
-reviewer finding — `grep` confirms zero `mention-utils.test.ts` exists
-today):
+**Correction from v1.1 review**: a new `mention-utils.test.ts` is NOT
+created. The existing `src/lib/mention-parser.test.ts` already tests
+`parseMentionQuery`, `rankMentionResults`, and the other helpers in
+`mention-utils.ts`. PR1's behavior-change tests are **added to
+`mention-parser.test.ts`** (same file). The new test file is
+`MentionInput.test.tsx` for component-level tests.
+
+In `src/lib/mention-parser.test.ts` (existing, modified):
 
 - `parseMentionQuery("@foo ", caret=5)` → `{ active: false, query: "" }`
+  **(new — behavior change)**
 - `parseMentionQuery("hello @foo", caret=10)` → unchanged (still inactive
   mid-line, since `@` is not preceded by whitespace)
 - `parseMentionQuery("@foo", caret=4)` → `{ active: true, query: "foo" }`
@@ -339,8 +356,11 @@ today):
   (unchanged: `@` between trigger and caret)
 - `parseMentionQuery("a@b", caret=3)` → `{ active: false, query: "" }`
   (unchanged: `@` not preceded by whitespace)
+- Review all existing `parseMentionQuery` tests for any that asserted
+  `active: true` for whitespace-containing input — those will fail and
+  must be updated to expect `active: false`.
 
-In `MentionInput.test.tsx` (new file):
+In `src/components/MentionInput.test.tsx` (new file):
 - `space_dismisses_popover_immediately` — type `@auth`, popover opens;
   fire keydown for space; assert `popover.open === false` synchronously
   (not on next effect).
@@ -371,8 +391,9 @@ pub enum CommandMode {
 ```
 
 `RISKY_TOOLS` in `agent_loop.rs:47` (`["write_file", "edit_file",
-"run_command"]`) is deleted. The `requires_approval` function in
-`agent_loop.rs:238-244` becomes:
+"run_command"]`) is **renamed** to `MUTATING_TOOLS` (same contents, same
+value). The `requires_approval` function in `agent_loop.rs:238-244`
+becomes:
 
 ```rust
 fn requires_approval(mode: &CommandMode, name: &str) -> bool {
@@ -382,6 +403,14 @@ fn requires_approval(mode: &CommandMode, name: &str) -> bool {
     }
 }
 ```
+
+`MUTATING_TOOLS` is **not** used by `requires_approval` — it is used by
+`is_mutating` (lines 273-274) for stall detection (`agent_loop.rs:1346`).
+The two have different semantics: `is_mutating` is about "tools that
+mutate the workspace" (for stall detection) and is independent of
+approval policy. Both rename cleanly. The new name reflects the new
+role: `MUTATING_TOOLS` is a stall-detection concern, not an approval
+concern.
 
 ### 4.2 Approval matrix
 
@@ -398,22 +427,44 @@ in the JSON. The new field is `last_mode: "commands" | "yolo"`. The disk
 format version stays at `2` (the rename is in-place; new optional fields
 have `#[serde(default)]` so old files load cleanly).
 
-**Migration mechanism**: the new `last_mode` field carries
-`#[serde(alias = "action_mode")]`. When serde parses an old session file,
-it will look for `last_mode` first; if not found, it looks for the alias
-`action_mode`. The value found in `action_mode` is then converted by a
-`Deserialize` impl on `CommandMode` (or a `From<&str>` helper used during
-a post-parse normalization pass) that maps:
+**Migration mechanism — two parts** (correction from v1.1 review: a
+bare `#[serde(alias = "action_mode")]` only matches the field name, not
+the value, so it is necessary but not sufficient):
 
-- `"auto"` → `CommandMode::Yolo` (closest semantic — runs without asking)
-- `"askRisky"` → `CommandMode::Commands` (the new default)
-- `"askAll"` → `CommandMode::Commands` (collapse — `commands` is the
-  stricter of the two, the safer migration target)
-- anything else → `CommandMode::default()` (Commands)
+1. **Field-name alias**: the new `last_mode` field carries
+   `#[serde(alias = "action_mode")]`. When serde parses an old session
+   file, it will read the value of the `action_mode` key into the
+   `last_mode` field if `last_mode` is missing.
 
-After the first save under PR3, the file is rewritten with `last_mode` and
-no `action_mode`. The alias stays in the codebase for at least one release
-so reverts remain possible; it can be removed in a later cleanup PR.
+2. **Value remap via custom `Deserialize` on `CommandMode`**: the enum
+   carries a `#[serde(rename_all = "camelCase")]` and a custom
+   `Deserialize` impl that accepts BOTH the new value set
+   (`"commands" | "yolo"`) AND the legacy value set
+   (`"auto" | "askRisky" | "askAll"`). The legacy values are mapped to
+   the new enum:
+
+   - `"auto"` → `CommandMode::Yolo` (closest semantic — runs without
+     asking)
+   - `"askRisky"` → `CommandMode::Commands` (the new default)
+   - `"askAll"` → `CommandMode::Commands` (collapse — `commands` is the
+     stricter of the two, the safer migration target)
+   - `"commands"` → `CommandMode::Commands` (canonical, post-PR3)
+   - `"yolo"` → `CommandMode::Yolo` (canonical, post-PR3)
+   - anything else → `CommandMode::default()` (Commands)
+
+   The custom `Deserialize` is implemented via serde's
+   `#[serde(from = "CommandModeShadow")]` pattern (or equivalent):
+   declare a private `CommandModeShadow` enum with the union value set
+   (camelCase), `Deserialize` it normally, then convert to `CommandMode`
+   in a `From` impl. This is the standard serde idiom for accepting
+   multiple wire formats for the same Rust type.
+
+3. **When both keys are present**: serde reads `last_mode` first and
+   ignores `action_mode` (the alias is a fallback, not a merger). On the
+   next save, the file is rewritten with `last_mode` only.
+
+4. **Field is removed eventually**: after a release where we confirm no
+   in-the-wild sessions carry `action_mode`, the alias is dropped.
 
 **Default semantic change (call out)**: the old default was
 `ActionMode::AskRisky`; the new default is `CommandMode::Commands`. These
@@ -454,26 +505,36 @@ In `agent_loop.rs`:
 
 ### 4.6 Files (PR3)
 
-Confirmed `ActionMode` / `actionMode` / `ACTION_MODES` references via grep
-across `src/` and `src-tauri/src/`:
+Confirmed `ActionMode` / `actionMode` / `ACTION_MODES` references via
+comprehensive grep across `src/` and `src-tauri/src/`. **Correction from
+v1.1**: `tools.rs` is NOT free of `ActionMode` references and
+`commands.rs` was missing entirely. Full list:
 
-- `src-tauri/src/agent_loop.rs` (lines 36, 264 — replace with
-  `CommandMode`)
-- `src-tauri/src/session.rs` (lines 73, 190, 453, 666, 864 — rename enum,
-  add alias, add migration)
-- `src-tauri/src/tools.rs` — no direct `ActionMode` ref; only reads
-  `auto_allowed` bool. No change needed beyond ensuring the
-  `ToolContext::auto_allowed` field is still set correctly when
-  `requires_approval` returns true.
-- `src/components/Chat.tsx` (lines 17, 34-38, 73-74, 575 — rename
-  `ACTION_MODES` to `COMMAND_MODES`, update the segmented control)
-- `src/components/Sidebar.tsx` (line 279 — one reference, update the
-  type alias)
-- `src/lib/ipc.ts` (lines 59, 103, 377, 614 — rename `ActionMode` type
-  alias and the `actionMode` field in `AgentTurnRequest`)
-- `src/lib/session-manager.ts` (lines 24, 47, 113, 151, 236, 455 — six
-  call sites; update field name and type)
-- `src/lib/store.ts` (lines 44, 159-160, 405-406 — store type)
+- `src-tauri/src/agent_loop.rs` — ~30 references (lines 36, 264-270,
+  527, 542, 627, 648, 749, 762, 778, 800, 812, 842, 1061, 1187, 1194,
+  1447, 1483, 1494, 1532, 1563, 1593, 1657, 1704, 1750, 1789, 1811,
+  1860). Replace `ActionMode` with `CommandMode`.
+- `src-tauri/src/session.rs` — enum at line 68; references at 68, 190,
+  453, 666, 864. Rename enum, add alias, add custom `Deserialize`, add
+  migration.
+- `src-tauri/src/commands.rs` — references at lines 426
+  (`action_mode: crate::session::ActionMode`), 458, 469. Rename type
+  alias and field name. **Was missed in v1.1.**
+- `src-tauri/src/tools.rs` — `use crate::session::ActionMode;` at line
+  33; `action_mode: ActionMode` at line 162; propagation at line 838;
+  test at line 1641. **The v1.1 claim that this file has no direct
+  ref was wrong; corrected here.**
+- `src/components/Chat.tsx` — lines 17, 34-38, 73-74, 570, 575, 577
+  (rename `ACTION_MODES` to `COMMAND_MODES`, update segmented control,
+  update both the `ActionMode` import and the type-asserted values).
+- `src/components/Sidebar.tsx` — line 279.
+- `src/lib/ipc.ts` — lines 59, 103, 377, 614.
+- `src/lib/session-manager.ts` — lines 24, 47, 113, 151, 236, 455.
+- `src/lib/store.ts` — lines 44, 159-160, 405-406.
+
+**Note on line numbers**: line numbers are illustrative; the implementer
+must re-grep before editing because other PRs may shift them. The file
+list is exhaustive.
 
 ### 4.7 Migration tests (PR3)
 
@@ -652,16 +713,22 @@ verbatim.
 
 ### 6.3 Manual trigger (`/compact`)
 
-1. **Pre-checks**:
-   - **Zero-message session**: if `messages` is empty (or contains only
-     prior summaries), `/compact` is a no-op and shows a toast "Nothing to
-     compact". The LLM is **not** called.
-   - **In-flight turn**: if `streamingRequestId || agentRequestId` is
-     set, `/compact` is **rejected** with a toast "Wait for the current
-     turn to finish before compacting". The agent loop owns the session
-     while a turn runs; compact would race. (This supersedes the existing
-     "drop slash mid-stream" behavior in `Chat.tsx:240-241` for the
-     compact case only — the other slash commands still drop.)
+1. **Pre-checks** (executed in this order; the first that matches wins):
+   1. **In-flight turn**: if `streamingRequestId || agentRequestId` is
+      set, `/compact` is **rejected** with a toast "Wait for the current
+      turn to finish before compacting". The agent loop owns the session
+      while a turn runs; compact would race. (This supersedes the
+      existing "drop slash mid-stream" behavior in `Chat.tsx:240-241`
+      for the compact case only — the other slash commands still drop.)
+   2. **Zero-message session**: if `messages` is empty (or contains
+      only prior summaries), `/compact` is a no-op and shows a toast
+      "Nothing to compact". The LLM is **not** called.
+   3. **Reason**: in-flight check is more urgent — the user is more
+      likely to learn from "wait" than from "nothing to compact" and
+      will likely re-run `/compact` after the turn lands. If the
+      in-flight check were second, an empty session with a queued
+      message would silently show "nothing to compact" and confuse the
+      user.
 2. Take all messages with `kind != Some("summary")` (the "foldable" range).
 3. If the foldable range has 0 or 1 messages, no LLM call is needed —
    `/compact` is a no-op with a toast "Nothing meaningful to compact yet
@@ -671,16 +738,29 @@ verbatim.
    made, files modified, tool outcomes, open questions. **Discard file
    contents and command stdout unless the content itself is what the user
    asked about.**"
-5. **Error handling**: if the LLM call throws, the session is **left
-   unchanged** (no half-written summary message, no `CompactState`
-   update). The error is surfaced as a toast "Compaction failed: <reason>".
-   The LLM is retried by the user invoking `/compact` again.
+5. **Error handling — three sub-cases**:
+   1. **LLM call throws**: the session is **left unchanged** (no
+      half-written summary message, no `CompactState` update). The error
+      is surfaced as a toast "Compaction failed: <reason>". The LLM is
+      retried by the user invoking `/compact` again.
+   2. **LLM call returns a malformed response**: empty content, or
+      content over 5k tokens (heuristic: the LLM didn't actually
+      summarize), or content matching a "refusal" pattern
+      (`"I can't"`, `"I cannot"`, `"I'm unable"`). These are treated
+      identically to a thrown error: session left unchanged, toast
+      "Compaction failed: response did not look like a summary".
+   3. **Cancellation via `cancel_rx`**: same as a thrown error.
 6. On success: replace the folded range with a single summary message
    (`role: "system"`, `kind: "summary"`, `compactMeta: {…}`).
+   - The summary message's `id` is generated server-side in
+     `compact.rs` as `format!("sum-{}", uuid::Uuid::new_v4())`. This
+     format matches the `sum-<uuid>` shape shown in the §6.2 example
+     and is stable across the codebase.
 7. Persist, emit a `chat-compacted` event so the UI can show a "Compacted ·
    14 → 1 message" toast.
 8. The `Session.compact` is updated with `compacted_at`,
-   `summary_message_id`, `original_count`, token estimates.
+   `summary_message_id` (== the new summary's `id`), `original_count`,
+   token estimates.
 9. The `Session.last_turn` field is **cleared** (set to `None`): the file
    watcher's fallback (which uses `lastTurn.reasoning`) points at a
    `requestId` that may no longer be in the visible message list after
@@ -784,22 +864,93 @@ In `src-tauri/src/agent_loop.rs` and a new `src-tauri/src/compact.rs`:
   for a non-trivial input set; the summary `id` is non-empty and
   `summary_message_id == id`.
 
+### 6.7.5 `complete_with_system_prompt` — LLM client extension (PR3)
+
+A new function on the `TurnCompleter` trait in `src-tauri/src/llm_client.rs`:
+
+```rust
+#[async_trait]
+pub trait TurnCompleter: Send + Sync {
+    // existing methods (e.g., complete_with_tools) unchanged
+
+    /// Single-shot LLM call: given a system prompt and a user prompt,
+    /// return the assistant's response as a string. No streaming, no
+    /// tool calls, no message array — the compactor needs a single
+    /// text blob to fold into a summary message.
+    async fn complete_with_system_prompt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model_id: &str,
+        secrets: &dyn SecretStore,
+        cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<String, AgentTurnError>;
+}
+```
+
+Properties:
+
+- **No streaming**: returns a single `String`. The compactor needs the
+  full summary before it can replace the folded range. Streaming would
+  require partial-state handling that the compactor doesn't need.
+- **No tools**: the compactor's job is summarization, not tool use. The
+  LLM is given only the system + user prompt; tool use would be
+  irrelevant (and confusing — the LLM might call `read_file` on the
+  very files we're trying to summarize out).
+- **Cancellation**: the existing `cancel_rx` pattern from
+  `complete_with_tools` is reused. A cancelled compact fails the same
+  way a thrown LLM error does (session left unchanged).
+- **Error type**: reuses the existing `AgentTurnError` enum. The compactor
+  catches any variant and treats it as a summarization failure
+  (§6.3 step 5).
+
+Implementations:
+
+- `OpenAiCompleter` — implemented in the OpenAI dispatch path. Uses the
+  chat completions API with `messages: [{role: "system", content: ...},
+  {role: "user", content: ...}]`, `tools: None`, `stream: false`. The
+  provider's response is unwrapped to a single string.
+- `MockCompleter` (test) — returns a canned summary or an error per test
+  setup.
+
+**Tests** (PR3, in `llm_client.rs` and `compact.rs`):
+
+- `complete_with_system_prompt_returns_string` — happy path: returns the
+  canned string verbatim.
+- `complete_with_system_prompt_propagates_cancellation` — cancel via
+  `cancel_rx`; assert `Err(AgentTurnError::Cancelled)`.
+- `complete_with_system_prompt_propagates_provider_error` — mock returns
+  `Err(AgentTurnError::Provider(...))`; assert the compactor's §6.3 step 5
+  path fires.
+
 ### 6.8 Files (PR3)
 
 - `src-tauri/src/session.rs` — `Message` gains `kind` + `compactMeta`;
-  `CompactState`; compact functions
+  `CompactState`; compact functions; `CommandMode` rename + alias +
+  custom `Deserialize`
 - `src-tauri/src/agent_loop.rs` — new `compact_chat` path; auto-trigger
-  before each call; update `history_from_session` filter
+  before each call; update `history_from_session` filter; `RISKY_TOOLS`
+  → `MUTATING_TOOLS` rename; `requires_approval` uses `CommandMode`
 - `src-tauri/src/compact.rs` — new, compact-specific logic
-  (LLM call, fold/replace, error handling)
-- `src-tauri/src/llm_client.rs` — add `complete_with_system_prompt` (or
-  extend existing) for the summarization call
+  (LLM call, fold/replace, error handling, id generation, malformed-
+  response guard)
+- `src-tauri/src/llm_client.rs` — add `complete_with_system_prompt` per
+  §6.7.5
+- `src-tauri/src/tools.rs` — rename `ActionMode` references
+- `src-tauri/src/commands.rs` — rename `ActionMode` references
 - `src/components/Chat.tsx` — wire `/compact`; show token estimate in
-  composer footer; show undo toast; handle in-flight rejection
+  composer footer; show undo toast; handle in-flight rejection; rename
+  `ActionMode` references
 - `src/components/MessageRenderer.tsx` — render `kind: "summary"`
   messages as collapsed disclosure
+- `src/components/Sidebar.tsx` — rename `ActionMode` reference
 - `src/lib/commands.ts` — register `/compact` (from PR2)
 - `src/lib/chat-errors.ts` — handle compact errors
+- `src/lib/ipc.ts` — rename `ActionMode` type alias
+- `src/lib/session-manager.ts` — rename `ActionMode` references; wire
+  the `last_mode` / `last_model_id` restore + persist flow
+- `src/lib/store.ts` — rename `ActionMode` references; add new fields
+  to the store
 
 ---
 
@@ -873,3 +1024,26 @@ revision addresses them. Cross-references use the reviewer's check numbers.
 
 **Summary**: 15 issues fixed, 1 deferred to follow-up (naming), 1 explicitly
 acknowledged as a fix-and-test pair (parseMentionQuery).
+
+### Appendix A.1: v1.1 → v1.2
+
+The v1.1 spec was reviewed again and returned **FAIL** with 10 new
+findings (3 P0, 4 P2, 3 P3). v1.2 addresses them.
+
+| Finding | Severity | Status | Fix |
+|---------|----------|--------|-----|
+| Check 1 fix was incomplete — `#[serde(alias)]` only matches field names, not values | P0 | ✅ Fixed | §4.3: two-part migration — `#[serde(alias)]` for the field name + custom `Deserialize` via `CommandModeShadow` for the value remap |
+| `src-tauri/src/commands.rs` missing from file list (3 refs) | P0 | ✅ Fixed | §4.6: added to the file list |
+| `src-tauri/src/tools.rs` had false "no direct ref" claim; actually has 4 refs | P0 | ✅ Fixed | §4.6: corrected to list the actual 4 references (lines 33, 162, 838, 1641) |
+| `RISKY_TOOLS` deletion broke `is_mutating` (compile failure) | P0 | ✅ Fixed | §4.1: rename to `MUTATING_TOOLS` (same contents) with explicit callout that `is_mutating` is the consumer |
+| `complete_with_system_prompt` mentioned but never specified | P0 | ✅ Fixed | §6.7.5: full section — signature, properties, implementations, tests |
+| Pre-check ordering between zero-message and in-flight | P2 | ✅ Fixed | §6.3 step 1: in-flight check runs first (more urgent) |
+| Summary id generation unspecified | P2 | ✅ Fixed | §6.3 step 6: `format!("sum-{}", uuid::Uuid::new_v4())` in `compact.rs` |
+| Malformed-but-successful LLM response not handled | P2 | ✅ Fixed | §6.3 step 5.2: three sub-cases (throw, malformed, cancel) |
+| PR3 claimed independent of PR2 but modifies PR2's `commands.ts` | P1 | ✅ Fixed | §0: explicit dependency chain PR1 → PR2 → PR3; PR3's `src/lib/commands.ts` modification is now acknowledged |
+| Line numbers drift; `mention-utils.test.ts` duplicates `mention-parser.test.ts` coverage | P3 | ✅ Fixed | §3.3: clarified that tests go into existing `mention-parser.test.ts`; line-number caveat added to §4.6 |
+
+**Summary**: 9 issues fixed (3 P0, 1 P1, 4 P2, 1 P3). 1 finding (popover
+arbitration rationale) was acknowledged but the design kept — slash
+wins is implementable and the tests cover the cases. The spec is ready
+for re-review.
