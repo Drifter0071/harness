@@ -1,0 +1,378 @@
+[2m8:44:40[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[31m         [33m<[31m[33mContentPanel[31m onClose[33m=[31m{close} [33m/[31m[33m>[31m
+ [90m 459 |[31m         [33m<[31m[33mSessionsPanel[31m [33m/[31m[33m>[31m
+[31m[1m>[22m[31m[90m 460 |[31m       [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m     |[31m       [31m[1m^[22m[31m
+ [90m 461 |[31m     [33m<[31m[33m/[31m[33m>[31m
+ [90m 462 |[31m   )[33m;[31m
+ [90m 463 |[31m }[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/components/Sidebar.tsx[39m:460:6
+      at constructor (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:369:19)
+      at TypeScriptParserMixin.raise (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6620:19)
+      at TypeScriptParserMixin.jsxParseElementAt (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4736:14)
+      at TypeScriptParserMixin.jsxParseElement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4765:17)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4775:19)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:39
+      at TypeScriptParserMixin.tryParse (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6928:20)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12455:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12522:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11701:28)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11357:23)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4780:20)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9807:20)
+      at TypeScriptParserMixin.parseExpressionBase (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10805:23)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12450:16)
+      at TypeScriptParserMixin.parseExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:17)
+      at TypeScriptParserMixin.parseReturnStatement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13171:28)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12827:21)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9529:18)
+      at TypeScriptParserMixin.parseStatementLike (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12796:17)
+      at TypeScriptParserMixin.parseStatementListItem (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12776:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13345:61)
+      at TypeScriptParserMixin.parseBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13338:10)
+      at TypeScriptParserMixin.parseBlock (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13326:10)
+      at TypeScriptParserMixin.parseFunctionBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12129:24)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12115:10)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9193:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13474:12
+      at TypeScriptParserMixin.withSmartMixTopicForbiddingContext (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12432:14)
+      at TypeScriptParserMixin.parseFunction (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13473:10)
+[2m8:44:42[22m [31m[1m[vite][22m[39m Pre-transform error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[39m         [33m<[39m[33mContentPanel[39m onClose[33m=[39m{close} [33m/[39m[33m>[39m
+ [90m 459 |[39m         [33m<[39m[33mSessionsPanel[39m [33m/[39m[33m>[39m
+[31m[1m>[22m[39m[90m 460 |[39m       [33m<[39m[33m/[39m[33mdiv[39m[33m>[39m
+ [90m     |[39m       [31m[1m^[22m[39m
+ [90m 461 |[39m     [33m<[39m[33m/[39m[33m>[39m
+ [90m 462 |[39m   )[33m;[39m
+ [90m 463 |[39m }[0m
+[2m8:44:42[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[31m         [33m<[31m[33mContentPanel[31m onClose[33m=[31m{close} [33m/[31m[33m>[31m
+ [90m 459 |[31m         [33m<[31m[33mSessionsPanel[31m [33m/[31m[33m>[31m
+[31m[1m>[22m[31m[90m 460 |[31m       [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m     |[31m       [31m[1m^[22m[31m
+ [90m 461 |[31m     [33m<[31m[33m/[31m[33m>[31m
+ [90m 462 |[31m   )[33m;[31m
+ [90m 463 |[31m }[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/components/Sidebar.tsx[39m:460:6
+      at constructor (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:369:19)
+      at TypeScriptParserMixin.raise (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6620:19)
+      at TypeScriptParserMixin.jsxParseElementAt (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4736:14)
+      at TypeScriptParserMixin.jsxParseElement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4765:17)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4775:19)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:39
+      at TypeScriptParserMixin.tryParse (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6928:20)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12455:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12522:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11701:28)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11357:23)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4780:20)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9807:20)
+      at TypeScriptParserMixin.parseExpressionBase (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10805:23)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12450:16)
+      at TypeScriptParserMixin.parseExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:17)
+      at TypeScriptParserMixin.parseReturnStatement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13171:28)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12827:21)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9529:18)
+      at TypeScriptParserMixin.parseStatementLike (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12796:17)
+      at TypeScriptParserMixin.parseStatementListItem (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12776:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13345:61)
+      at TypeScriptParserMixin.parseBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13338:10)
+      at TypeScriptParserMixin.parseBlock (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13326:10)
+      at TypeScriptParserMixin.parseFunctionBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12129:24)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12115:10)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9193:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13474:12
+      at TypeScriptParserMixin.withSmartMixTopicForbiddingContext (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12432:14)
+      at TypeScriptParserMixin.parseFunction (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13473:10)
+[2m8:44:47[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[31m         [33m<[31m[33mContentPanel[31m onClose[33m=[31m{close} [33m/[31m[33m>[31m
+ [90m 459 |[31m         [33m<[31m[33mSessionsPanel[31m [33m/[31m[33m>[31m
+[31m[1m>[22m[31m[90m 460 |[31m       [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m     |[31m       [31m[1m^[22m[31m
+ [90m 461 |[31m     [33m<[31m[33m/[31m[33m>[31m
+ [90m 462 |[31m   )[33m;[31m
+ [90m 463 |[31m }[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/components/Sidebar.tsx[39m:460:6
+      at constructor (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:369:19)
+      at TypeScriptParserMixin.raise (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6620:19)
+      at TypeScriptParserMixin.jsxParseElementAt (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4736:14)
+      at TypeScriptParserMixin.jsxParseElement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4765:17)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4775:19)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:39
+      at TypeScriptParserMixin.tryParse (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6928:20)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12455:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12522:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11701:28)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11357:23)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4780:20)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9807:20)
+      at TypeScriptParserMixin.parseExpressionBase (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10805:23)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12450:16)
+      at TypeScriptParserMixin.parseExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:17)
+      at TypeScriptParserMixin.parseReturnStatement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13171:28)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12827:21)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9529:18)
+      at TypeScriptParserMixin.parseStatementLike (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12796:17)
+      at TypeScriptParserMixin.parseStatementListItem (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12776:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13345:61)
+      at TypeScriptParserMixin.parseBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13338:10)
+      at TypeScriptParserMixin.parseBlock (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13326:10)
+      at TypeScriptParserMixin.parseFunctionBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12129:24)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12115:10)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9193:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13474:12
+      at TypeScriptParserMixin.withSmartMixTopicForbiddingContext (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12432:14)
+      at TypeScriptParserMixin.parseFunction (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13473:10)
+[2m8:44:51[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[31m         [33m<[31m[33mContentPanel[31m onClose[33m=[31m{close} [33m/[31m[33m>[31m
+ [90m 459 |[31m         [33m<[31m[33mSessionsPanel[31m [33m/[31m[33m>[31m
+[31m[1m>[22m[31m[90m 460 |[31m       [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m     |[31m       [31m[1m^[22m[31m
+ [90m 461 |[31m     [33m<[31m[33m/[31m[33m>[31m
+ [90m 462 |[31m   )[33m;[31m
+ [90m 463 |[31m }[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/components/Sidebar.tsx[39m:460:6
+      at constructor (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:369:19)
+      at TypeScriptParserMixin.raise (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6620:19)
+      at TypeScriptParserMixin.jsxParseElementAt (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4736:14)
+      at TypeScriptParserMixin.jsxParseElement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4765:17)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4775:19)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:39
+      at TypeScriptParserMixin.tryParse (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:6928:20)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9796:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12455:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10821:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12522:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11701:28)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11357:23)
+      at TypeScriptParserMixin.parseExprAtom (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:4780:20)
+      at TypeScriptParserMixin.parseExprSubscripts (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11102:23)
+      at TypeScriptParserMixin.parseUpdate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11087:21)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:11067:23)
+      at TypeScriptParserMixin.parseMaybeUnary (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9858:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10920:61)
+      at TypeScriptParserMixin.parseExprOps (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10925:23)
+      at TypeScriptParserMixin.parseMaybeConditional (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10902:23)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10852:21)
+      at TypeScriptParserMixin.parseMaybeAssign (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9807:20)
+      at TypeScriptParserMixin.parseExpressionBase (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10805:23)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:39
+      at TypeScriptParserMixin.allowInAnd (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12450:16)
+      at TypeScriptParserMixin.parseExpression (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:10801:17)
+      at TypeScriptParserMixin.parseReturnStatement (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13171:28)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12827:21)
+      at TypeScriptParserMixin.parseStatementContent (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9529:18)
+      at TypeScriptParserMixin.parseStatementLike (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12796:17)
+      at TypeScriptParserMixin.parseStatementListItem (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12776:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13345:61)
+      at TypeScriptParserMixin.parseBlockBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13338:10)
+      at TypeScriptParserMixin.parseBlock (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13326:10)
+      at TypeScriptParserMixin.parseFunctionBody (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12129:24)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12115:10)
+      at TypeScriptParserMixin.parseFunctionBodyAndFinish (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:9193:18)
+      at C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13474:12
+      at TypeScriptParserMixin.withSmartMixTopicForbiddingContext (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:12432:14)
+      at TypeScriptParserMixin.parseFunction (C:\Users\garvangel\Documents\GitHub\harness\node_modules\@babel\parser\lib\index.js:13473:10)
+[2m8:44:52[22m [31m[1m[vite][22m[39m Pre-transform error: C:\Users\garvangel\Documents\GitHub\harness\src\components\Sidebar.tsx: Expected corresponding JSX closing tag for <>. (460:6)
+
+[0m [90m 458 |[39m         [33m<[39m[33mContentPanel[39m onClose[33m=[39m{close} [33m/[39m[33m>[39m
+ [90m 459 |[39m         [33m<[39m[33mSessionsPanel[39m [33m/[39m[33m>[39m
+[31m[1m>[22m[39m[90m 460 |[39m       [33m<[39m[33m/[39m[33mdiv[39m[33m>[39m
+ [90m     |[39m       [31m[1m^[22m[39m
+ [90m 461 |[39m     [33m<[39m[33m/[39m[33m>[39m
+ [90m 462 |[39m   )[33m;[39m
+ [90m 463 |[39m }[0m
+[2m10:28:16[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+[2m10:28:16[22m [31m[1m[vite][22m[39m Pre-transform error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?
+[2m10:28:19[22m [31m[1m[vite][22m[39m Pre-transform error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?
+[2m10:28:21[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+      at async viteTransformMiddleware (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:62106:24)
+[2m10:28:43[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+      at async viteTransformMiddleware (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:62106:24)
+[2m10:28:53[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+      at async viteTransformMiddleware (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:62106:24)
+[2m10:30:28[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+      at async viteTransformMiddleware (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:62106:24)
+[2m10:30:51[22m [31m[1m[vite][22m[39m Pre-transform error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?
+[2m10:30:53[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "highlight.js/lib/languages/toml" from "src/lib/highlight.ts". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/garvangel/Documents/GitHub/harness/src/lib/highlight.ts[39m:22:17
+[33m  12 |  import markdown from "highlight.js/lib/languages/markdown";
+  13 |  import yaml from "highlight.js/lib/languages/yaml";
+  14 |  import toml from "highlight.js/lib/languages/toml";
+     |                    ^
+  15 |  import go from "highlight.js/lib/languages/go";
+  16 |  import java from "highlight.js/lib/languages/java";[39m
+      at TransformPluginContext._formatError (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49258:41)
+      at TransformPluginContext.error (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49253:16)
+      at normalizeUrl (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64307:23)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+      at async Promise.all (index 13)
+      at async TransformPluginContext.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7)
+      at async PluginContainer.transform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49099:18)
+      at async loadAndTransform (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:51978:27)
+      at async viteTransformMiddleware (file:///C:/Users/garvangel/Documents/GitHub/harness/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:62106:24)

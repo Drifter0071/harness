@@ -1,0 +1,300 @@
+   Compiling harness v0.1.0 (C:\Users\garvangel\Documents\GitHub\harness\src-tauri)
+warning: function `fresh_token` is never used
+  --> src\hci\auth.rs:25:8
+   |
+25 | pub fn fresh_token() -> String {
+   |        ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `inner` is never read
+  --> src\hci\auth.rs:33:5
+   |
+32 | pub struct AuthState {
+   |            --------- field in this struct
+33 |     inner: Mutex<AuthInner>,
+   |     ^^^^^
+   |
+   = note: `AuthState` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `boot_token` and `sessions` are never read
+  --> src\hci\auth.rs:39:5
+   |
+37 | struct AuthInner {
+   |        --------- fields in this struct
+38 |     /// The current boot token. `None` once it's been consumed.
+39 |     boot_token: Option<String>,
+   |     ^^^^^^^^^^
+40 |     /// Live session tokens. Cleared on rotation.
+41 |     sessions: HashSet<String>,
+   |     ^^^^^^^^
+   |
+   = note: `AuthInner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated items `new`, `new_with_random`, `consume_boot_token`, `is_valid_session`, and `rotate` are never used
+  --> src\hci\auth.rs:45:12
+   |
+44 | impl AuthState {
+   | -------------- associated items in this implementation
+45 |     pub fn new(boot_token: String) -> Arc<Self> {
+   |            ^^^
+...
+57 |     pub fn new_with_random() -> Arc<Self> {
+   |            ^^^^^^^^^^^^^^^
+...
+63 |     pub fn consume_boot_token(&self, presented: &str) -> Option<String> {
+   |            ^^^^^^^^^^^^^^^^^^
+...
+78 |     pub fn is_valid_session(&self, presented: &str) -> bool {
+   |            ^^^^^^^^^^^^^^^^
+...
+87 |     pub fn rotate(&self) -> String {
+   |            ^^^^^^
+
+warning: function `constant_time_eq` is never used
+  --> src\hci\auth.rs:99:4
+   |
+99 | fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+   |    ^^^^^^^^^^^^^^^^
+
+warning: field `inner` is never read
+  --> src\hci\methods_canvas.rs:23:5
+   |
+22 | pub struct CanvasEventBus {
+   |            -------------- field in this struct
+23 |     inner: Arc<broadcast::Sender<Value>>,
+   |     ^^^^^
+   |
+   = note: `CanvasEventBus` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `subscribe` and `publish` are never used
+  --> src\hci\methods_canvas.rs:39:12
+   |
+32 | impl CanvasEventBus {
+   | ------------------- methods in this implementation
+...
+39 |     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+   |            ^^^^^^^^^
+...
+44 |     pub fn publish(&self, event: Value) {
+   |            ^^^^^^^
+
+warning: function `register` is never used
+  --> src\hci\methods_canvas.rs:94:8
+   |
+94 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+   |        ^^^^^^^^
+
+warning: function `register` is never used
+   --> src\hci\methods_sessions_agents.rs:148:8
+    |
+148 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+    |        ^^^^^^^^
+
+warning: function `register` is never used
+  --> src\hci\methods_system.rs:78:8
+   |
+78 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+   |        ^^^^^^^^
+
+warning: function `register` is never used
+   --> src\hci\methods_workspace.rs:170:8
+    |
+170 | pub fn register(router: crate::hci::router::Router) -> crate::hci::router::Router {
+    |        ^^^^^^^^
+
+warning: constant `ERR_AUTH_REQUIRED` is never used
+  --> src\hci\router.rs:31:11
+   |
+31 | pub const ERR_AUTH_REQUIRED: i32 = -32002;
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: field `auth` is never read
+  --> src\hci\router.rs:42:9
+   |
+37 | pub struct RpcContext {
+   |            ---------- field in this struct
+...
+42 |     pub auth: Option<Arc<AuthState>>,
+   |         ^^^^
+   |
+   = note: `RpcContext` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `session_token` is never read
+  --> src\hci\router.rs:75:9
+   |
+74 | pub struct ConnectionCtx {
+   |            ------------- field in this struct
+75 |     pub session_token: String,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `ConnectionCtx` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: variants `AuthRequired`, `WritesDisabled`, and `MethodNotFound` are never constructed
+  --> src\hci\router.rs:83:5
+   |
+79 | pub enum RouterError {
+   |          ----------- variants in this enum
+...
+83 |     AuthRequired,
+   |     ^^^^^^^^^^^^
+84 |     #[error("write tier disabled; set HARNESS_CONTROL_WRITE=1 to enable")]
+85 |     WritesDisabled,
+   |     ^^^^^^^^^^^^^^
+86 |     #[error("method not found: {0}")]
+87 |     MethodNotFound(String),
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `RouterError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `methods` is never used
+   --> src\hci\router.rs:208:12
+    |
+184 | impl Router {
+    | ----------- method in this implementation
+...
+208 |     pub fn methods(&self) -> impl Iterator<Item = &'static str> + '_ {
+    |            ^^^^^^^
+
+warning: associated function `from_env` is never used
+  --> src\hci\server.rs:41:12
+   |
+39 | impl HciServerConfig {
+   | -------------------- associated function in this implementation
+40 |     /// Default config: loopback only, channel reflects the build profile.
+41 |     pub fn from_env() -> Self {
+   |            ^^^^^^^^
+
+warning: fields `config`, `conn_info`, `router`, `rpc_ctx`, and `listener_task` are never read
+  --> src\hci\server.rs:58:9
+   |
+57 | pub struct HciServer {
+   |            --------- fields in this struct
+58 |     pub config: HciServerConfig,
+   |         ^^^^^^
+59 |     pub conn_info: ConnInfo,
+   |         ^^^^^^^^^
+60 |     pub router: Arc<Router>,
+   |         ^^^^^^
+61 |     pub rpc_ctx: RpcContext,
+   |         ^^^^^^^
+62 |     shutdown: Arc<Notify>,
+63 |     listener_task: JoinHandle<()>,
+   |     ^^^^^^^^^^^^^
+
+warning: methods `shutdown` and `join` are never used
+   --> src\hci\server.rs:112:12
+    |
+ 66 | impl HciServer {
+    | -------------- methods in this implementation
+...
+112 |     pub fn shutdown(&self) {
+    |            ^^^^^^^^
+...
+117 |     pub async fn join(mut self) -> std::io::Result<()> {
+    |                  ^^^^
+
+warning: struct `HealthConfig` is never constructed
+  --> src\health_agent.rs:35:12
+   |
+35 | pub struct HealthConfig {
+   |            ^^^^^^^^^^^^
+
+warning: struct `SessionSnapshot` is never constructed
+  --> src\health_agent.rs:60:12
+   |
+60 | pub struct SessionSnapshot {
+   |            ^^^^^^^^^^^^^^^
+
+warning: enum `Verdict` is never used
+  --> src\health_agent.rs:70:10
+   |
+70 | pub enum Verdict {
+   |          ^^^^^^^
+
+warning: trait `LlmCaller` is never used
+  --> src\health_agent.rs:86:11
+   |
+86 | pub trait LlmCaller: Send + Sync {
+   |           ^^^^^^^^^
+
+warning: struct `HeuristicCaller` is never constructed
+  --> src\health_agent.rs:94:12
+   |
+94 | pub struct HeuristicCaller;
+   |            ^^^^^^^^^^^^^^^
+
+warning: struct `HealthAgent` is never constructed
+   --> src\health_agent.rs:110:12
+    |
+110 | pub struct HealthAgent {
+    |            ^^^^^^^^^^^
+
+warning: struct `AlertRecord` is never constructed
+   --> src\health_agent.rs:122:12
+    |
+122 | pub struct AlertRecord {
+    |            ^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src\health_agent.rs:133:12
+    |
+130 | impl HealthAgent {
+    | ---------------- associated items in this implementation
+...
+133 |     pub fn start(
+    |            ^^^^^
+...
+173 |     pub fn recent_alerts(&self, limit: usize) -> Vec<AlertRecord> {
+    |            ^^^^^^^^^^^^^
+...
+179 |     pub fn config(&self) -> &HealthConfig {
+    |            ^^^^^^
+...
+185 |     pub fn update_config(&mut self, cfg: HealthConfig) {
+    |            ^^^^^^^^^^^^^
+...
+190 |     pub fn shutdown(&self) {
+    |            ^^^^^^^^
+...
+196 |     pub fn router(&self) -> Arc<Router> {
+    |            ^^^^^^
+...
+203 |     pub fn rpc_ctx(&self) -> RpcContext {
+    |            ^^^^^^^
+...
+215 |     pub fn in_process_conn(&self) -> ConnectionCtx {
+    |            ^^^^^^^^^^^^^^^
+
+warning: function `run_tick_loop` is never used
+   --> src\health_agent.rs:228:10
+    |
+228 | async fn run_tick_loop(
+    |          ^^^^^^^^^^^^^
+
+warning: function `run_one_tick` is never used
+   --> src\health_agent.rs:272:10
+    |
+272 | async fn run_one_tick(
+    |          ^^^^^^^^^^^^
+
+warning: function `verdict_reason` is never used
+   --> src\health_agent.rs:305:4
+    |
+305 | fn verdict_reason(v: &Verdict) -> String {
+    |    ^^^^^^^^^^^^^^
+
+warning: field `stop_tx` is never read
+  --> src\session_watcher.rs:26:5
+   |
+22 | pub struct SessionWatcher {
+   |            -------------- field in this struct
+...
+26 |     stop_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+   |     ^^^^^^^
+
+warning: `harness` (lib) generated 31 warnings
+error: failed to remove file `C:\Users\garvangel\Documents\GitHub\harness\src-tauri\target\debug\harness.exe`
+
+Caused by:
+  Access is denied. (os error 5)
