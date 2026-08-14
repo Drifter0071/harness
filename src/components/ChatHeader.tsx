@@ -60,13 +60,12 @@ export function ChatHeader() {
   }, []);
 
   return (
-    // Center column of the app-level grid (1fr / auto / 1fr). The auto
-    // column sizes itself to fit Bip, so the stat line always renders
-    // directly under Bip at the same width. White-space: nowrap keeps
-    // the three label groups on a single line.
+    // The stat line sits directly under the topbar. White-space: nowrap
+    // keeps the three label groups on a single line. Centered on its
+    // own row (the parent flexbox is `justify-center`).
     <div
       ref={headerRef}
-      className="col-start-2 col-span-1 py-2 select-none text-[11px] whitespace-nowrap"
+      className="py-2 select-none text-[11px] whitespace-nowrap"
     >
       {/* Row 1: model · last response · context used — one horizontal
           line with hairline dividers, centered under Bip. */}

@@ -6,11 +6,9 @@ import { FileTypeIcon } from "../lib/file-icons";
 import {
   Folder,
   FileText,
-  PanelLeftClose,
   History,
   X,
   Plus,
-  Bot,
 } from "lucide-react";
 
 // ── Layout constants ─────────────────────────────────────────────────────
@@ -49,8 +47,8 @@ function ActiveDot({ visible }: { visible: boolean }) {
 }
 
 // Single panel chrome — header (section label + optional trailing slot)
-// + body. The trailing slot is where Content renders the column's
-// close button (next to the "Content" label); Sessions leaves it empty.
+// + body. The trailing slot is where Sessions renders the "new session"
+// button; Content leaves it empty.
 function PanelShell({
   label,
   icon,
@@ -100,7 +98,7 @@ function PanelShell({
 // Natural size — sizes to its content (header + path + file rows) with a
 // soft cap so it never crowds Sessions. Sessions is the one that grows.
 
-function ContentPanel({ onClose }: { onClose: () => void }) {
+function ContentPanel() {
   const { workspacePath } = useStore();
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string>("");
@@ -135,16 +133,6 @@ function ContentPanel({ onClose }: { onClose: () => void }) {
     <PanelShell
       label="Content"
       icon={<Folder size={10} className="text-white-30 flex-shrink-0" />}
-      trailing={
-        <button
-          onClick={onClose}
-          className="glass-quartz glass-quartz--pill flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
-          title="Hide sidebar"
-          aria-label="Hide sidebar"
-        >
-          <PanelLeftClose size={16} />
-        </button>
-      }
     >
       {/* Active workspace pill */}
       {activeRoot && (
@@ -240,7 +228,6 @@ function SessionsPanel() {
     activeSessionId,
     setActiveSessionId,
     workspacePath,
-    setAgentManagerOpen,
   } = useStore();
 
   useEffect(() => {
@@ -317,26 +304,16 @@ function SessionsPanel() {
       count={sessions.length}
       grow
       trailing={
-        <div className="flex items-center gap-0.5">
-          {workspacePath && (
-            <button
-              onClick={handleNewSession}
-              className="glass-quartz glass-quartz--pill flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
-              title="New session"
-              aria-label="New session"
-            >
-              <Plus size={16} />
-            </button>
-          )}
+        workspacePath ? (
           <button
-            onClick={() => setAgentManagerOpen(true)}
+            onClick={handleNewSession}
             className="glass-quartz glass-quartz--pill flex items-center justify-center w-[34px] h-[34px] text-white-50 hover:text-white"
-            title="Agent Manager"
-            aria-label="Agent Manager"
+            title="New session"
+            aria-label="New session"
           >
-            <Bot size={16} />
+            <Plus size={16} />
           </button>
-        </div>
+        ) : null
       }
     >
       {/* Body — Sessions is the panel that grows to fill the column.
@@ -454,8 +431,7 @@ function formatRelativeTime(iso: string): string {
 // ── Public component (mounts the column) ─────────────────────────────────
 
 export function Sidebar() {
-  const { sidebarOpen, setSidebarOpen, chatHeaderHeight } = useStore();
-  const close = () => setSidebarOpen(false);
+  const { sidebarOpen, chatHeaderHeight } = useStore();
   // Anchor just below the chat header (height measured live by ChatHeader),
   // as a floating overlay — the chat content does not reflow around it.
   const top = chatHeaderHeight + SIDEBAR_GAP;
@@ -479,7 +455,7 @@ export function Sidebar() {
           gap: PANEL_GAP,
         }}
       >
-        <ContentPanel onClose={close} />
+        <ContentPanel />
         <SessionsPanel />
       </div>
     </>

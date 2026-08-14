@@ -99,41 +99,46 @@ const CONFETTI_COLORS = ["#a3e635", "#8b5cf6", "#ffc94d", "#b28dff", "#54e3a8"];
  * GSAP MorphSVG needs to interpolate cleanly between them.
  *
  * Coordinate space: a 96×96 viewBox centered on the face.
- * Left eye center  ~ (40, 51)
- * Right eye center ~ (56, 51)
- * Mouth center     ~ (48, 64)
+ *   Left eye center  ~ (38, 51)
+ *   Right eye center ~ (58, 51)
+ *   Mouth center     ~ (48, 68)
+ *
+ * The face is the priority: visor takes ~54% of head height, eyes
+ * are ~14×14, mouth is ~22px wide — the character reads as
+ * expressive at small (24px) sizes too.
  * ────────────────────────────────────────────────────────────────── */
 const EYE_OPEN = {
-  left:  "M35 51 Q40 45.5 45 51 Q40 56.5 35 51 Z",
-  right: "M51 51 Q56 45.5 61 51 Q56 56.5 51 51 Z",
+  left:  "M31 51 Q38 42 45 51 Q38 60 31 51 Z",
+  right: "M51 51 Q58 42 65 51 Q58 60 51 51 Z",
 };
 const EYE_HALF = {
-  left:  "M36 51 Q40 49 44 51 Q40 53 36 51 Z",
-  right: "M52 51 Q56 49 60 51 Q56 53 52 51 Z",
+  left:  "M32 51 Q38 47 44 51 Q38 55 32 51 Z",
+  right: "M52 51 Q58 47 64 51 Q58 55 52 51 Z",
 };
 const EYE_CLOSED = {
-  left:  "M36 51 Q40 50.4 44 51",
-  right: "M52 51 Q56 50.4 60 51",
+  left:  "M32 51 Q38 50 44 51",
+  right: "M52 51 Q58 50 64 51",
 };
 const EYE_HAPPY = {
-  left:  "M35 52 Q40 47 45 52",
-  right: "M51 52 Q56 47 61 52",
+  left:  "M30 53 Q38 44 46 53",
+  right: "M50 53 Q58 44 66 53",
 };
 const EYE_X = {
-  left:  "M36 47 L44 55 M44 47 L36 55",
-  right: "M52 47 L60 55 M60 47 L52 55",
+  left:  "M32 46 L44 56 M44 46 L32 56",
+  right: "M52 46 L64 56 M64 46 L52 56",
 };
 const EYE_O = {
-  left:  "M40 51 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0",
-  right: "M56 51 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0",
+  left:  "M38 51 m-4 0 a4 4 0 1 0 8 0 a4 4 0 1 0 -8 0",
+  right: "M58 51 m-4 0 a4 4 0 1 0 8 0 a4 4 0 1 0 -8 0",
 };
 
-/* Mouth — single path, four personalities */
-const MOUTH_GRIN  = "M40 64 Q48 71 56 64";          // celebration smile
-const MOUTH_FLAT  = "M41 65 L55 65";               // neutral, surprised-flat
-const MOUTH_O     = "M48 65 m-2.4 0 a2.4 1.8 0 1 0 4.8 0 a2.4 1.8 0 1 0 -4.8 0"; // "o" surprise
-const MOUTH_FROWN = "M40 67 Q48 63 56 67";          // tiny downturn for error
-const MOUTH_NEUTRAL = "M43 65 L53 65";             // resting / idle
+/* Mouth — single path, four personalities. Wider + more vertical
+ * range so the smile reads as an actual smile at small sizes. */
+const MOUTH_GRIN    = "M37 67 Q48 76 59 67";           // celebration smile
+const MOUTH_FLAT    = "M37 68 L59 68";                 // neutral, surprised-flat
+const MOUTH_O       = "M48 68 m-3.2 0 a3.2 2.4 0 1 0 6.4 0 a3.2 2.4 0 1 0 -6.4 0"; // "o" surprise
+const MOUTH_FROWN   = "M37 71 Q48 65 59 71";           // downturn for error
+const MOUTH_NEUTRAL = "M40 68 L56 68";                 // resting / idle
 
 /* Pick the right expression for a mood. Eyes and mouth can be tuned
  * independently per mood — e.g. "working" is wide-open eyes with a
@@ -218,22 +223,16 @@ export function AgentMascot({
     return () => { tl.kill(); };
   }, [mood, m.body, m.plate, m.plateDark, m.accent]);
 
-  /* One-shot entrance on first mount. */
+  /* One-shot entrance on first mount. Just a soft fade + lift;
+   * no horn-tip elastic pop (user feedback: no blinking lights). */
   useEffect(() => {
     if (!firstMount || REDUCED || !rootRef.current) return;
     const el = rootRef.current;
     gsap.fromTo(
       el,
-      { opacity: 0, scale: 0.92, transformOrigin: "50% 90%" },
-      { opacity: 1, scale: 1, duration: 0.48, ease: "power3.out" }
+      { opacity: 0, y: 6 },
+      { opacity: 1, y: 0, duration: 0.42, ease: "power2.out" }
     );
-    if (hornTip.current) {
-      gsap.fromTo(
-        hornTip.current,
-        { scale: 0.2, transformOrigin: "50% 50%" },
-        { scale: 1, duration: 0.6, ease: "elastic.out(1, 0.6)", delay: 0.15 }
-      );
-    }
   }, [firstMount]);
 
   return (
@@ -267,28 +266,27 @@ export function AgentMascot({
 
       {/* Head fins — gentle float, neon-lime outer edge */}
       <g className="bip-fin bip-fin--left">
-        <path d="M23 33 L8 39 L11 57 L24 49 Z" fill={m.plate} />
-        <path d="M8 39 L11 57" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
+        <path d="M22 32 L6 38 L10 58 L24 50 Z" fill={m.plate} />
+        <path d="M6 38 L10 58" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
       </g>
       <g className="bip-fin bip-fin--right">
-        <path d="M73 33 L88 39 L85 57 L72 49 Z" fill={m.plate} />
-        <path d="M88 39 L85 57" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
+        <path d="M74 32 L90 38 L86 58 L72 50 Z" fill={m.plate} />
+        <path d="M90 38 L86 58" className="bip-fin-edge" stroke={m.accent} strokeWidth="2" strokeLinecap="round" fill="none" />
       </g>
 
       {/* The horn — Eva signature, white bone, glowing tip */}
       <path d="M48 24 C 47 17, 45 12, 41.5 8 C 47 10, 50 15, 51 23 Z" fill={BONE} />
-      <circle ref={hornTip} cx="41.5" cy="8" r="2.6" fill={m.accent} className="mascot-glow bip-horn-tip" />
-      <circle cx="41.5" cy="8" r="6" fill={m.accent} className="bip-horn-aura" />
+      <circle ref={hornTip} cx="41.5" cy="8" r="2.6" fill={m.accent} />
 
       {/* Head — big rounded helmet. CSS does the breath scale. */}
       <rect
         ref={bodyRef}
         className="bip-body"
-        x="14"
-        y="23"
-        width="68"
-        height="54"
-        rx="22"
+        x="10"
+        y="22"
+        width="76"
+        height="60"
+        rx="24"
         fill={`url(#bip-body-${uid})`}
       />
 
@@ -296,32 +294,32 @@ export function AgentMascot({
       <rect
         ref={plateDarkRef}
         className="bip-brow"
-        x="22"
-        y="33"
-        width="52"
-        height="7"
-        rx="3.5"
+        x="18"
+        y="32"
+        width="60"
+        height="8"
+        rx="4"
         fill={m.plateDark}
       />
 
-      {/* Visor — bigger than v1, more room for eyes + cheek dots */}
-      <rect x="22" y="40" width="52" height="22" rx="11" fill={VISOR} />
+      {/* Visor — generously sized. Eyes + mouth sit inside it. */}
+      <rect x="14" y="40" width="68" height="32" rx="14" fill={VISOR} />
       {/* The Unit-01 nose crest line — draws on when working */}
       <line
         className="bip-nose-crest"
         x1="48"
         y1="40"
         x2="48"
-        y2="60"
+        y2="72"
         stroke={m.accent}
         strokeWidth="1.8"
         strokeLinecap="round"
         opacity="0.9"
       />
 
-      {/* Cheek dots — Eva-01 signature, soft accent glow */}
-      <circle cx="28" cy="58" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--left" />
-      <circle cx="68" cy="58" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--right" />
+      {/* Cheek dots — Eva-01 signature, sit on the visor edge */}
+      <circle cx="22" cy="68" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--left" />
+      <circle cx="74" cy="68" r="3.6" fill={`url(#bip-cheek-${uid})`} className="bip-cheek bip-cheek--right" />
 
       {/* Eyes — single path per side, GSAP morphs between expressions */}
       <g className="bip-eyes">
@@ -348,8 +346,8 @@ export function AgentMascot({
         {/* Glossy catch-lights, only meaningful when eyes are open */}
         {EXPRESSION_FOR[mood].eyes === EYE_OPEN && (
           <>
-            <circle className="bip-catchlight bip-catchlight--left" cx="38.5" cy="49.4" r="1.2" fill={VISOR} />
-            <circle className="bip-catchlight bip-catchlight--right" cx="54.5" cy="49.4" r="1.2" fill={VISOR} />
+            <circle className="bip-catchlight bip-catchlight--left" cx="35" cy="47" r="1.6" fill={VISOR} />
+            <circle className="bip-catchlight bip-catchlight--right" cx="55" cy="47" r="1.6" fill={VISOR} />
           </>
         )}
       </g>
@@ -360,27 +358,25 @@ export function AgentMascot({
         className="bip-mouth"
         d={EXPRESSION_FOR[mood].mouth}
         stroke={m.accent}
-        strokeWidth="2.4"
+        strokeWidth="2.6"
         strokeLinecap="round"
         strokeLinejoin="round"
         fill="none"
         opacity="0.95"
       />
 
-      {/* Chest collar — small pauldron nubs + breathing core */}
-      <path d="M20 78 L12 84 L14 94 L24 89 Z" fill={m.plate} />
-      <path d="M12 84 L14 94" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
-      <path d="M76 78 L84 84 L82 94 L72 89 Z" fill={m.plate} />
-      <path d="M84 84 L82 94" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
+      {/* Chest collar — small pauldron nubs, static core dot (no pulse) */}
+      <path d="M22 80 L14 86 L16 96 L26 91 Z" fill={m.plate} />
+      <path d="M14 86 L16 96" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
+      <path d="M74 80 L82 86 L80 96 L70 91 Z" fill={m.plate} />
+      <path d="M82 86 L80 96" stroke={m.accent} strokeWidth="1.8" strokeLinecap="round" fill="none" opacity="0.9" />
       <circle
         ref={(el) => { chestCore.current = el; }}
         cx="48"
-        cy="87"
-        r="3.8"
+        cy="89"
+        r="3.6"
         fill={m.accent}
-        className="mascot-glow bip-chest-core"
       />
-      <circle cx="48" cy="87" r="7" fill={m.accent} className="bip-chest-aura" />
 
       {/* Sparkle orbit — only in working mood. The whole frame rotates
           slowly (7.2s = two breath cycles), and each individual bit

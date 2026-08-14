@@ -738,16 +738,9 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   80%      { transform: translate(0.6px, 0)     rotate(0.6deg); }
 }
 
-/* ── Body — 3.6s breath (subtle vertical scale, origin bottom) ─ */
-.bip-body {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-  animation: bip-breath 3.6s ease-in-out infinite;
-}
-@keyframes bip-breath {
-  0%, 100% { transform: scale(1, 1); }
-  50%      { transform: scale(1.012, 1.022); }
-}
+/* ── Body — static. No breath scale. The character just sits there
+   doing whatever bob/celebrate/shake the wrapper does. ─ */
+.bip-body { transform-box: fill-box; transform-origin: 50% 100%; }
 
 /* ── Brow plate — subtle alert lift on working (via :has on root) */
 .bip-brow {
@@ -775,118 +768,34 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   0%, 100% { transform: rotate(0deg); }
   50%      { transform: rotate(-1.2deg); }
 }
-.bip-fin-edge {
-  stroke-dasharray: 24;
-  stroke-dashoffset: 0;
-  animation: bip-fin-pulse 7.2s ease-in-out infinite;
-}
-@keyframes bip-fin-pulse {
-  0%, 100% { stroke-dashoffset: 0;  opacity: 0.9; }
-  50%      { stroke-dashoffset: 12; opacity: 0.55; }
-}
+/* Fin edge — static, no dashoffset pulse (user feedback: no blinking
+   lights). The neon-lime edge just sits there. */
+.bip-fin-edge { stroke-dasharray: none; stroke-dashoffset: 0; }
 
-/* ── Eyes — slow contented blink, only fires on idle/working ─ */
-.bip-eye {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-blink 5.2s ease-in-out infinite;
-}
-/* In error/success mood, the eyes are arcs / X — no blink. */
-[data-mood="success"] .bip-eye,
-[data-mood="error"]   .bip-eye { animation: none; }
-@keyframes bip-blink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  95%, 97%      { transform: scaleY(0.08); }
-}
+/* ── Eyes — no blink, no pulse. The eyes are the character; a hard
+   scaleY snap reads as cheap. (Catches a blink via morph only.) ─ */
+.bip-eye { transform-box: fill-box; transform-origin: center; }
 
-/* Catch-lights — tiny scaleY wink in phase with blink */
-.bip-catchlight {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-catchlight 5.2s ease-in-out infinite;
-}
-@keyframes bip-catchlight {
-  0%, 92%, 100% { opacity: 1; transform: scaleY(1); }
-  95%, 97%      { opacity: 0; transform: scaleY(0.1); }
-}
+/* Catch-lights — static, no wink */
+.bip-catchlight { transform-box: fill-box; transform-origin: center; }
 
-/* Cheek dots — soft accent pulse, slightly out of phase */
-.bip-cheek {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-cheek 3.6s ease-in-out infinite;
-  animation-delay: -0.9s; /* 1/4 breath lag */
-}
-.bip-cheek--right { animation-delay: -1.4s; }
-@keyframes bip-cheek {
-  0%, 100% { opacity: 0.55; transform: scale(0.9); }
-  50%      { opacity: 1;    transform: scale(1.08); }
-}
+/* Cheek dots — static accent dots. No opacity/scale pulse. */
+.bip-cheek { transform-box: fill-box; transform-origin: center; }
 
-/* Mouth — tiny squash on the smile, lag behind breath */
-.bip-mouth {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-  animation: bip-mouth 3.6s ease-in-out infinite;
-  animation-delay: -0.3s;
-}
-@keyframes bip-mouth {
-  0%, 100% { transform: scaleY(1); }
-  50%      { transform: scaleY(1.12); }
-}
+/* Mouth — static, no squash. */
+.bip-mouth { transform-box: fill-box; transform-origin: 50% 100%; }
 
-/* Nose crest — draws on (stroke-dashoffset) when working,
-   fades out otherwise. */
-.bip-nose-crest {
-  stroke-dasharray: 20;
-  stroke-dashoffset: 20;
-  transition: stroke-dashoffset 360ms ease-out, opacity 240ms ease;
-}
-[data-mood="working"] .bip-nose-crest { stroke-dashoffset: 0; }
+/* Nose crest — static, no draw-on. (User feedback: no blinking
+   lights — a stroke-dashoffset draw is a "wink".) */
+.bip-nose-crest { stroke-dasharray: none; stroke-dashoffset: 0; }
 
-/* ── Horn tip — 1.8s breath, in phase with body ─ */
-.bip-horn-tip {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-horn-pulse 1.8s ease-in-out infinite;
-}
-@keyframes bip-horn-pulse {
-  0%, 100% { transform: scale(1);    opacity: 0.85; }
-  50%      { transform: scale(1.18); opacity: 1;    }
-}
-/* Soft outer aura — lags the tip by 200ms */
-.bip-horn-aura {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-horn-aura 1.8s ease-in-out infinite;
-  animation-delay: -0.2s;
-  opacity: 0.25;
-}
-@keyframes bip-horn-aura {
-  0%, 100% { transform: scale(0.9); opacity: 0.15; }
-  50%      { transform: scale(1.6); opacity: 0.45; }
-}
-
-/* Chest core — same 1.8s pulse as horn tip, in phase */
-.bip-chest-core {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-horn-pulse 1.8s ease-in-out infinite;
-}
-.bip-chest-aura {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-horn-aura 1.8s ease-in-out infinite;
-  animation-delay: -0.4s;
-  opacity: 0.2;
-}
-
-/* Backwards-compat glow for legacy / non-React sub-elements (e.g.
-   the typing buddy's small horn + chest core). Same 1.8s cycle. */
-.mascot-glow { animation: bip-horn-pulse 1.8s ease-in-out infinite; }
+/* ── No horn-tip pulse, no chest-core pulse, no auras, no
+   mascot-glow. The horn tip + chest core are static colored dots
+   that re-tint with the mood. ─ */
 
 /* ── Halo — soft colored aura behind the mascot; hue per mood
-     is passed from React as `--halo-color` (an rgba string). ─ */
+     is passed from React as `--halo-color` (an rgba string).
+     Static — no pulse, no scale. (User feedback: no blinking lights.) ─ */
 .mascot-halo {
   position: absolute;
   inset: -8px;
@@ -894,32 +803,14 @@ input[type="range"].slider-quartz::-moz-range-thumb {
   background: radial-gradient(circle, var(--halo-color, rgba(255, 255, 255, 0.10)) 0%, transparent 68%);
   filter: blur(3px);
   pointer-events: none;
-  animation: bip-halo 3.6s ease-in-out infinite;
   transition: background 480ms ease;
 }
-@keyframes bip-halo {
-  0%, 100% { opacity: 0.55; transform: scale(1);    }
-  50%      { opacity: 1;    transform: scale(1.06); }
-}
 
-/* ── Sparkle orbit (working) — birth→life→fade per bit, staggered.
-     The wrapper rotates one full turn in 7.2s (two breath cycles),
-     and each bit individually scales in/out on its own period. ─ */
-.bip-sparkle {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: bip-sparkle-life 2.4s ease-in-out infinite;
-}
-.bip-sparkle--1 { animation-delay: 0s;     }
-.bip-sparkle--2 { animation-delay: -0.6s;  }
-.bip-sparkle--3 { animation-delay: -1.2s;  }
-.bip-sparkle--4 { animation-delay: -1.8s;  }
-@keyframes bip-sparkle-life {
-  0%, 100% { transform: scale(0); opacity: 0; }
-  20%      { transform: scale(1.2); opacity: 1; }
-  50%      { transform: scale(0.9); opacity: 0.9; }
-  80%      { transform: scale(0.4); opacity: 0.4; }
-}
+/* ── Sparkle orbit (working) — static, not pulsing. The frame
+   rotates slowly so the bits drift, but each bit does not scale
+   in/out (that was reading as blinking lights). The bits just sit
+   there and the frame carries them. ─ */
+.bip-sparkle { transform-box: fill-box; transform-origin: center; }
 .bip-orbit-frame {
   transform-box: fill-box;
   transform-origin: center;
@@ -975,15 +866,14 @@ input[type="range"].slider-quartz::-moz-range-thumb {
 
 /* ── Reduced motion: keep a beautiful static pose, not "frozen
      mid-frame". All animations stop, but the body still has a
-     single neutral state: eyes half-open, no fin/orbit, no
-     bouncing. Confetti vanishes (it's a one-shot celebration
-     that depends on motion). ─ */
+     single neutral state: eyes at their natural expression, no
+     fin/orbit spin, no bouncing. Confetti vanishes (it's a one-shot
+     celebration that depends on motion). ─ */
 @media (prefers-reduced-motion: reduce) {
   .bip-bob, .bip-bob--fast, .bip-celebrate, .bip-shake,
   .bip-body, .bip-brow, .bip-fin, .bip-fin-edge,
   .bip-eye, .bip-catchlight, .bip-cheek, .bip-mouth,
-  .bip-nose-crest, .bip-horn-tip, .bip-horn-aura,
-  .bip-chest-core, .bip-chest-aura, .mascot-glow,
+  .bip-nose-crest,
   .mascot-halo, .bip-sparkle, .bip-orbit-frame,
   .confetti-piece, .mascot-typing, .mascot-sweep,
   .broom-wiggle, .sweep-dust {
@@ -991,10 +881,8 @@ input[type="range"].slider-quartz::-moz-range-thumb {
     transition: none !important;
   }
   .confetti-piece { opacity: 0; }
-  .bip-fin         { transform: none; }
-  .bip-horn-aura, .bip-chest-aura { opacity: 0.35; }
-  .bip-mouth       { transform: none; }
-  .bip-cheek       { transform: none; opacity: 0.7; }
+  .bip-fin   { transform: none; }
+  .bip-cheek { transform: none; opacity: 0.7; }
 }
 
 /* ── Composer — soft mint focus ring (the one colored focus in the
