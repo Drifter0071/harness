@@ -59,7 +59,7 @@ export function WindowManager({ width, height }: WindowManagerProps) {
   }, []); // intentionally empty — self-contained, no prop deps
 
   if (subagents.length === 0) {
-    return <div ref={containerRef} className="h-full" />;
+    return <div ref={containerRef} className="h-full flex-1 min-w-0" />;
   }
 
   const tiles = computeTiles(subagents.length, size.width, size.height);
@@ -67,7 +67,7 @@ export function WindowManager({ width, height }: WindowManagerProps) {
   return (
     <div
       ref={containerRef}
-      className="relative h-full overflow-hidden"
+      className="relative h-full overflow-hidden flex-1 min-w-0"
       data-testid="window-manager"
     >
       {tiles.map((tile, i) => {

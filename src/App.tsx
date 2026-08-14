@@ -108,7 +108,7 @@ function App() {
       </div>
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <div ref={contentRef} className="flex flex-1 overflow-hidden">
+        <div ref={contentRef} className="flex flex-1 min-w-0 overflow-hidden">
           {/* Chat column (left). Locks to its width once a subagent
            *  spawns; never auto-resizes after. */}
           <div
