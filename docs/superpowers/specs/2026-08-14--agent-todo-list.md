@@ -157,15 +157,24 @@ event.
 
 ### 4. Streaming event
 
-A new event on the existing Tauri event bus:
+A new event on the existing Tauri event bus, declared as a struct
+with `#[serde(rename_all = "camelCase")]` to match the rest of the
+event bus (`DoneEvent`, `TurnStartEvent`, `ApprovalRequestEvent`,
+etc.):
 
-```
-todo_changed {
-  session_id: string,
-  list: TodoList,
-  source: "agent" | "user"
+```rust
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoChangedEvent {
+    pub session_id: String,
+    pub list: TodoList,
+    pub source: TodoChangeSource,  // "agent" | "user"
 }
 ```
+
+The FE subscriber reads `event.sessionId`, `event.list`, and
+`event.source` — consistent with every other event handler in
+`session-manager.ts`.
 
 Emitted after every commit. The `source` field lets the frontend
 choose to flash a subtle highlight on agent mutations while leaving
@@ -190,13 +199,19 @@ let _guard = session_write_lock(&project_path, &session_id).await;
 save_session(&project_path, &session).await?;
 ```
 
-Implemented as `Arc<tokio::sync::Mutex<HashMap<(String, String), Arc<tokio::Mutex<()>>>>>`,
-lazily inserting per-(project, session) entries. The guard is
-released when `_guard` drops. The agent loop holds no per-session
-lock long-term — only the actual mutate-and-save window.
+Implemented as `Arc<DashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>`,
+matching the existing concurrency-primitive pattern in the repo
+(`agent_loop.rs:54`, `tools.rs:149`). Entries are lazily inserted
+per `(project_path, session_id)`; the inner `tokio::Mutex<()>` is
+the actual serialization point. The guard is released when
+`_guard` drops. The agent loop holds no per-session lock long-term
+— only the actual mutate-and-save window.
 
-The `TodoList::version` field is the logical clock: every commit
-increments it by 1, regardless of source. The FE uses it on
+`TodoList::version` is a **separate** monotonic counter owned by
+the todo list — it is *not* related to `Session::version` (which
+is a schema-version constant set to `2` on every save at
+`session.rs:621`). Every `todo_*` commit increments
+`TodoList::version` by 1, regardless of source. The FE uses it on
 incoming `todo_changed` events to detect lost optimistic updates:
 if the incoming `version` is greater than the local optimistic
 version, the local state is replaced. (Same-session race is now
@@ -208,13 +223,13 @@ belt-and-suspenders check, not a hard correctness requirement.)
 #### 6.1 `src/components/PlanStrip.tsx` (new)
 
 The hairline anchor strip. Lives in `ChatHeader` (the row directly
-under the title bar), rendered as a second centered line below the
-existing model/tokens/usage row, before the cumulative/session-window
-row. The current `ChatHeader` is a single centered cluster
-(`flex items-center justify-center gap-3`); we keep that cluster
-intact and add the strip as its own horizontal row beneath it,
-matching the existing two-row rhythm (cluster + progress bar on
-row 1; cumulative + session window on row 2).
+under the title bar), rendered as a new centered row between the
+existing model/tokens/usage cluster+progress-bar (ChatHeader.tsx:72-121)
+and the conditional cumulative/session-window row (ChatHeader.tsx:125-145).
+When the session-window row isn't present, the strip sits directly
+beneath the progress bar. The existing two-row layout is preserved
+intact; the strip is a third row that only appears when the list is
+non-empty.
 
 - **Hidden when** `items.length === 0`. Mounted always (zero-cost
   render). The first `todo_changed` event with non-empty items makes
@@ -322,17 +337,20 @@ the same way.
 **Validator (in `todo_set` handler):**
 
 ```rust
-fn validate_todo_set(session: &Session, new_items: &[TodoItem]) -> Result<(), ToolError> {
+// Returns the agent-loop's standard tool-error string, which
+// agent_loop.rs:1343-1350 wraps into ToolResult { ok: false, summary }.
+fn validate_todo_set(session: &Session, new_items: &[TodoItem]) -> Result<(), String> {
     let current = &session.todos.items;
     let is_empty = current.is_empty();
     let is_finished = !current.is_empty()
         && current.iter().all(|i| i.status == TodoStatus::Done);
 
     if !is_empty && !is_finished {
-        return Err(ToolError::Rejected(
+        return Err(
             "Cannot overwrite an active todo list. Finish all items or use \
-             todo_append / todo_update to modify the current list.".into()
-        ));
+             todo_append / todo_update to modify the current list."
+                .to_string()
+        );
     }
     Ok(())
 }
@@ -443,7 +461,7 @@ the TS side (`session-manager.ts`'s `scheduleSave`).
 | `text` over 280 chars | Validator rejects, error names the limit. FE `onBeforeInput` blocks the insertion. |
 | Concurrent agent + user edits to the same item | Per-session write lock in the Rust handlers (§5). `version` is bumped on every commit. FE compares version on incoming `todo_changed`; older local optimistic state is replaced. |
 | Session file fails to parse (corrupt JSON, pre-todo schema) | `#[serde(default)]` on `todos` means old sessions load with an empty list. No migration. |
-| `npm run dev` browser mode | Event bus registration is swallowed (`.catch(() => {})`, per `session-manager.ts:80-83`). Strip stays at its last known state. User-initiated IPC edits still work for the lifetime of the page (they go through Tauri command invocation, not the event bus). The agent never runs in the browser anyway. |
+| `npm run dev` browser mode | Event bus registration is swallowed (`.catch(() => {})`, per the registration pattern in `session-manager.ts` and `subagent-manager.ts:36-37`). Strip stays at its last known state. User-initiated IPC edits still work for the lifetime of the page (they go through Tauri command invocation, not the event bus). The agent never runs in the browser anyway. |
 
 ### 14. Edge cases
 
