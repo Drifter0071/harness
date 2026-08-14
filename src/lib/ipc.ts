@@ -620,7 +620,7 @@ export const ipc = {
       sessionId: req.sessionId,
       modelId: req.modelId,
       message: req.message,
-      lastMode: req.lastMode,
+      mode: req.lastMode,
       goalMode: req.goalMode,
       workspace: req.workspace,
       reasoningEffort: req.reasoningEffort,
