@@ -50,3 +50,5 @@ stderr*.txt
 stdout.txt
 spec_toc.txt
 quartz-preview.html
+
+dist/

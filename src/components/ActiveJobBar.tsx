@@ -5,12 +5,13 @@ import { ipc, chatEvents, agentEvents } from "../lib/ipc";
 import { Settings, Circle, FolderPlus, PanelLeftOpen } from "lucide-react";
 import { AgentMascot, ConfettiBurst, type MascotMood } from "./AgentMascot";
 
-/** Halo tint behind the mascot, per mood — soft, never loud. */
+/** Halo tint behind the mascot, per mood — soft, never loud.
+ *  Matches the body color the SVG body tints to (sky / lilac / sun / coral). */
 const HALO: Record<MascotMood, string> = {
-  idle: "rgba(255, 255, 255, 0.10)",
-  working: "rgba(84, 227, 168, 0.22)",
-  success: "rgba(255, 201, 77, 0.28)",
-  error: "rgba(239, 68, 68, 0.22)",
+  idle:    "rgba(91, 201, 255, 0.30)",   // sky
+  working: "rgba(178, 141, 255, 0.32)",  // lilac
+  success: "rgba(255, 201, 77, 0.34)",   // sun
+  error:   "rgba(239, 68, 68, 0.30)",    // coral / red
 };
 
 /** Accent border color per mood. Applied inline on the capsule so it
@@ -72,6 +73,17 @@ export function ActiveJobBar() {
   const working = hasActivity || !!streamingRequestId || !!agentRequestId;
   const [celebrate, setCelebrate] = useState(false);
   const [errorFlash, setErrorFlash] = useState(false);
+  // First-render flag — drives the one-shot entrance reveal on the
+  // main Bip. The mini Bip in the thoughts popover skips the entrance
+  // (it's a passive context icon, not a performative character).
+  const firstMountRef = useRef(true);
+  const isFirstRender = firstMountRef.current;
+  // After the first commit we drop the flag so subsequent re-renders
+  // skip the entrance. We flip it post-render via a layout effect so
+  // React commits the first paint with `firstMount` still true.
+  useEffect(() => {
+    firstMountRef.current = false;
+  }, []);
 
   // Thoughts panel telemetry — the "in depth" view of the session.
   const tokenStats = useStore((s) => s.tokenStats);
@@ -213,15 +225,15 @@ export function ActiveJobBar() {
               <div
                 className={
                   mood === "working"
-                    ? "mascot-bob--fast"
+                    ? "bip-bob--fast"
                     : mood === "success"
-                      ? "mascot-bounce"
+                      ? "bip-celebrate"
                       : mood === "error"
-                        ? "mascot-shake"
-                        : "mascot-bob"
+                        ? "bip-shake"
+                        : "bip-bob"
                 }
               >
-                <AgentMascot mood={mood} size={36} />
+                <AgentMascot mood={mood} size={36} firstMount={isFirstRender} />
               </div>
               {celebrate && <ConfettiBurst />}
             </div>

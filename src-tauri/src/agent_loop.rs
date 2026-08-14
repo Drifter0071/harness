@@ -1,4 +1,4 @@
-﻿//! Rust-owned agent turn loop (spec Â§4, Â§5).
+//! Rust-owned agent turn loop (spec Â§4, Â§5).
 //!
 //! One `run_agent_turn` call drives a complete agent turn: stream the
 //! provider response, execute requested tool calls through the policy gate
