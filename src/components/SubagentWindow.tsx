@@ -66,9 +66,10 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
 
   return (
     <div className="flex flex-col h-full bg-surface-0 overflow-hidden">
-      {/* Header: agent name + role + status. Stop button only while
-       *  the turn is in flight. No close button — windows are
-       *  closed in unison by the next orchestrator turn-start. */}
+      {/* Header: agent name + role + model badge + status. Stop
+       *  button only while the turn is in flight. No close button
+       *  — windows auto-dismiss 3s after terminal and are wiped in
+       *  unison by the next orchestrator turn-start. */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle bg-surface-1 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <StatusDot status={status} />
@@ -78,6 +79,14 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
           <span className="text-[10px] text-white-30 truncate">
             {w.record.role}
           </span>
+          {w.record.modelId && (
+            <span
+              className="text-[10px] text-white-50 bg-surface-2 border border-border-subtle rounded px-1.5 py-0.5 truncate max-w-[120px]"
+              title={w.record.modelId}
+            >
+              {w.record.modelId}
+            </span>
+          )}
         </div>
         {isWorking && (
           <button
@@ -96,7 +105,7 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
        *   - Tool calls: stacked cards above the assistant text.
        *   - Health Monitor: right-aligned system-style bubble.
        *   - Subagent response: left-aligned assistant text with
-       *     agent name above and the streaming "typing…" indicator
+       *     agent name above and the streaming "thinking…" indicator
        *     while working. */}
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
         {/* Task bubble — the orchestrator's delegation, right-aligned. */}
@@ -105,7 +114,7 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
             <div className="text-[10px] font-medium text-white-30 mb-1 text-right">
               Orchestrator
             </div>
-            <div className="text-[13px] leading-relaxed bg-surface-3 text-white-50 rounded-2xl rounded-br-sm px-3.5 py-2 whitespace-pre-wrap">
+            <div className="text-[13px] leading-relaxed bg-surface-3 text-white rounded-2xl px-3.5 py-2 whitespace-pre-wrap">
               {w.record.task}
             </div>
           </div>
@@ -119,7 +128,7 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
                 <span className="font-medium tracking-wide uppercase">Health Monitor</span>
                 <Brain size={10} className="shrink-0" />
               </div>
-              <div className="text-[13px] leading-relaxed bg-surface-3 text-white-50 rounded-2xl rounded-br-sm px-3.5 py-2 whitespace-pre-wrap">
+              <div className="text-[13px] leading-relaxed bg-surface-3 text-white rounded-2xl px-3.5 py-2 whitespace-pre-wrap">
                 {msg}
               </div>
             </div>

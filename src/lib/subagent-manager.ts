@@ -60,6 +60,7 @@ export function useSubagentManager(): void {
             role: e.subagent.role,
             task: e.subagent.task,
             status: "working",
+            modelId: e.subagent.modelId,
             parentRequestId: ORCHESTRATOR_AGENT_ID,
             startedAt: new Date().toISOString(),
           };
@@ -169,10 +170,11 @@ export function useSubagentManager(): void {
                 ? e.reasoning
                 : w?.reasoning ?? "",
           });
-          // Terminal event: the window stays open so the user can
-          // read the final streamed answer. The chat only reflows
-          // back when a new orchestrator turn starts (see the
-          // `agent-turn-start` listener further down).
+          // Auto-dismiss: after a short read window the window fades
+          // out so the right region doesn't accumulate stale viewers
+          // forever. The chat reflows back as soon as the last
+          // subagent is gone.
+          scheduleAutoDismiss(e.requestId);
         })
       )
     );
@@ -191,9 +193,9 @@ export function useSubagentManager(): void {
             content: w?.content ?? "",
             reasoning: w?.reasoning ?? "",
           });
-          // Same as the done path: window stays open, chat ratio
-          // stays locked. Reflow only happens on the next
-          // orchestrator turn-start.
+          // Same auto-dismiss as the done path: 3s read window
+          // after the turn ends, then the window is removed.
+          scheduleAutoDismiss(e.requestId);
         })
       )
     );
@@ -245,6 +247,7 @@ export function useSubagentManager(): void {
             ipc.cancelAgent(rec.requestId).catch(() => {});
           }
         }
+        clearAllDismissTimers();
         st.clearAllSubagents();
         st.clearChatRatio();
       })
@@ -304,6 +307,36 @@ export function useSubagentManager(): void {
       cancelled = true;
     };
   }, []);
+}
+
+// ── Auto-dismiss after terminal ──
+// A finished subagent window lives for SUBAGENT_DISMISS_MS so the
+// user has a beat to read the final answer, then is removed. The
+// timer is keyed by request id; if a new orchestrator turn starts
+// before it fires, `clearAllSubagents` runs and the registry is
+// empty by the time the callback would have run — we still bail
+// defensively (the subagent won't be in the registry anymore).
+const SUBAGENT_DISMISS_MS = 3000;
+/** Per-requestId timeout handles, so a fresh terminal event resets
+ *  the timer (e.g. error → done within the window). */
+const dismissTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleAutoDismiss(requestId: string): void {
+  const existing = dismissTimers.get(requestId);
+  if (existing) clearTimeout(existing);
+  const handle = setTimeout(() => {
+    dismissTimers.delete(requestId);
+    const st = useStore.getState();
+    if (st.subagents.find((r) => r.requestId === requestId)) {
+      st.removeSubagent(requestId);
+    }
+  }, SUBAGENT_DISMISS_MS);
+  dismissTimers.set(requestId, handle);
+}
+/** Called when the registry is wiped (next orchestrator turn) so
+ *  the pending timers don't fire on already-removed entries. */
+function clearAllDismissTimers(): void {
+  for (const handle of dismissTimers.values()) clearTimeout(handle);
+  dismissTimers.clear();
 }
 
 // ── Helpers used by the SubagentWindow component ──

@@ -829,7 +829,7 @@ function MessageBubble({ message }: { message: SessionMessage }) {
             {message.agentName}
           </div>
         )}
-        <div className={`text-[14px] leading-relaxed ${isUser ? "bg-surface-3 text-white-50 rounded-2xl rounded-br-sm px-4 py-2.5" : "text-white"}`}>
+        <div className={`text-[14px] leading-relaxed ${isUser ? "bg-surface-3 text-white rounded-2xl px-4 py-2.5" : "text-white"}`}>
           {!isUser && toolCalls.length > 0 && (
             <div className="space-y-1.5 mb-2">
               {toolCalls.map((call) => (

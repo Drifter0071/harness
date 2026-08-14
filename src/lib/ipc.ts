@@ -403,6 +403,10 @@ export interface SubagentStartInfo {
   name: string;
   role: AgentRole;
   task: string;
+  /** Saved-model id the subagent turn is about to run against;
+   *  surfaced in the window header so the user can see which model
+   *  the agent is using. */
+  modelId?: string;
 }
 
 export interface AgentTurnStart {
@@ -495,6 +499,9 @@ export interface SubagentRecord {
   /** The delegation task text the orchestrator handed over. */
   task: string;
   status: SubagentStatus;
+  /** Saved-model id the subagent turn ran against. Surfaced in the
+   *  window header so the user can see which model the agent used. */
+  modelId?: string;
   /** requestId of the orchestrator turn that dispatched this subagent. */
   parentRequestId?: string;
   startedAt: string;

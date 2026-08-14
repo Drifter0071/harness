@@ -149,6 +149,10 @@ pub struct SubagentRecord {
     /// The delegation task text the orchestrator handed over.
     pub task: String,
     pub status: SubagentStatus,
+    /// Saved-model id the subagent turn ran against. Surfaced in the
+    /// window header so the user can see which model the agent used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /// requestId of the orchestrator turn that dispatched this subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_request_id: Option<String>,
@@ -164,12 +168,14 @@ pub struct SubagentRecord {
 }
 
 impl SubagentRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn working(
         request_id: &str,
         personality_id: &str,
         name: &str,
         role: AgentRole,
         task: &str,
+        model_id: Option<&str>,
         parent_request_id: Option<&str>,
     ) -> Self {
         Self {
@@ -179,6 +185,7 @@ impl SubagentRecord {
             role,
             task: task.to_string(),
             status: SubagentStatus::Working,
+            model_id: model_id.map(|s| s.to_string()),
             parent_request_id: parent_request_id.map(|s| s.to_string()),
             started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,

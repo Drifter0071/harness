@@ -824,6 +824,7 @@ async fn tool_delegate_subagent(ctx: &ToolContext, args: &Value) -> Result<ToolR
             &personality.name,
             personality.role,
             &task,
+            Some(&model_id),
             Some(&dispatch.request_id),
         ),
     );

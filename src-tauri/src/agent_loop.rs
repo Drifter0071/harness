@@ -74,6 +74,11 @@ pub struct SubagentStartInfo {
     pub name: String,
     pub role: AgentRole,
     pub task: String,
+    /// Saved-model id the subagent turn is about to run against.
+    /// Surfaced in the window header so the user can see which model
+    /// the agent is using.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -922,6 +927,7 @@ async fn run_turn_core(
             name: resolved.name.clone(),
             role: resolved.role,
             task: message_text.to_string(),
+            model_id: Some(resolved.model_id.clone()),
         })
     };
     sink.emit(
