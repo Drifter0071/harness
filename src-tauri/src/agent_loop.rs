@@ -1,4 +1,4 @@
-//! Rust-owned agent turn loop (spec Â§4, Â§5).
+//! Rust-owned agent turn loop (spec Ă‚Â§4, Ă‚Â§5).
 //!
 //! One `run_agent_turn` call drives a complete agent turn: stream the
 //! provider response, execute requested tool calls through the policy gate
@@ -51,7 +51,7 @@ const CONTINUE_MARKER: &str = "[continue]";
 
 /// Whether a turn's session mutations are written to disk. Chat turns
 /// (`Real`) persist to `<project>/.harness/sessions/`; dispatched
-/// subagent turns run against a scratch session and never touch disk —
+/// subagent turns run against a scratch session and never touch disk â€”
 /// their content is delivered to the user via streamed events and to
 /// the orchestrator via the `delegate_subagent` tool result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +184,7 @@ pub trait TurnCompleter: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentTurnError>> + Send>>;
 
     /// Single-shot LLM call for compaction: system prompt + user prompt, no
-    /// tools, no streaming, returns the raw text response (spec §6.7.5).
+    /// tools, no streaming, returns the raw text response (spec Â§6.7.5).
     fn complete_with_system_prompt(
         &self,
         system_prompt: &str,
@@ -276,7 +276,7 @@ impl AgentEventSink for AppEventSink {
 
 /// Per-turn cancellation: the sender is registered in the `in_flight` map
 /// so `cancel_agent(request_id)` can flip it; the loop races `changed()` /
-/// `wait_for()` at every await. Watch receivers are "sticky" â€” a cancel sent
+/// `wait_for()` at every await. Watch receivers are "sticky" Ă˘â‚¬â€ť a cancel sent
 /// between awaits is observed at the next await, so no cancellation is lost.
 fn new_cancel_token() -> (watch::Sender<bool>, watch::Receiver<bool>) {
     watch::channel(false)
@@ -307,7 +307,7 @@ fn requires_approval(mode: &CommandMode, name: &str) -> bool {
             // sense that they wipe items the user may have edited;
             // surface them for approval in Commands mode so the
             // user sees what's being changed. (Spec
-            // 2026-08-14--agent-todo-list.md §2.)
+            // 2026-08-14--agent-todo-list.md Â§2.)
             name == "run_command" || name == "todo_remove" || name == "todo_clear"
         }
         CommandMode::Yolo => false,
@@ -323,7 +323,7 @@ fn is_mutating(name: &str) -> bool {
 
 /// Rebuild the provider history from persisted session messages. Tool-granular
 /// `role:"tool"` records are not persisted (they live in `activities`), so a
-/// fresh turn replays user/assistant text only â€" the assistant summary carries
+/// fresh turn replays user/assistant text only Ă˘â‚¬" the assistant summary carries
 /// the state across turns. Within a turn, the loop keeps the full
 /// assistant-echo + tool-result sequence in `messages` so OpenAI accepts
 /// multi-round tool use.
@@ -373,7 +373,7 @@ fn build_system_prompt(
     // Todo list (spec 2026-08-14--agent-todo-list.md). Injected as
     // a compact block in the system message so the model sees the
     // current plan on every turn but it isn't treated as fresh user
-    // input. Empty list → no block, no noise.
+    // input. Empty list â†’ no block, no noise.
     if !todos.items.is_empty() {
         let done = todos
             .items
@@ -391,16 +391,16 @@ fn build_system_prompt(
 }
 
 /// Render a todo list as the compact block the LLM sees each turn.
-/// Each item is one line: a marker (✓ done, → in_progress, ⏵
+/// Each item is one line: a marker (âś“ done, â†’ in_progress, âŹµ
 /// pending) + the item text. Stable so model diffs over multiple
 /// turns don't trip on formatting churn.
 fn format_todo_block(items: &[crate::session::TodoItem]) -> String {
     let mut out = String::new();
     for item in items {
         let marker = match item.status {
-            crate::session::TodoStatus::Done => "✓",
-            crate::session::TodoStatus::InProgress => "→",
-            crate::session::TodoStatus::Pending => "⏵",
+            crate::session::TodoStatus::Done => "âś“",
+            crate::session::TodoStatus::InProgress => "â†’",
+            crate::session::TodoStatus::Pending => "âŹµ",
         };
         out.push_str(&format!("  {} {}\n", marker, item.text));
     }
@@ -436,7 +436,7 @@ fn merge_usage(stats: &mut Option<TokenStats>, usage: &ChatUsage) {
     });
     s.last_in = usage.input;
     s.last_out = usage.output;
-    // `cumulativeIn` is the peak input size, not a sum (spec Â§4.5).
+    // `cumulativeIn` is the peak input size, not a sum (spec Ă‚Â§4.5).
     s.cumulative_in = s.cumulative_in.max(usage.input);
     s.cumulative_out = s.cumulative_out.saturating_add(usage.output);
 }
@@ -467,14 +467,14 @@ fn user_message(session: &mut Session, text: &str) {
 /// (`agent-<requestId>`) that the frontend pre-inserts into the store, so
 /// the persisted message and the in-memory placeholder stay the same
 /// row. Without this, the assistant text lands in a fresh-UUID message
-/// while the placeholder stays empty in the session file â€” which is
+/// while the placeholder stays empty in the session file Ă˘â‚¬â€ť which is
 /// Persist the final assistant message for the turn. This is an
 /// UPSERT, not an append: multi-round turns previously pushed one
 /// message per round under the same `agent-<requestId>` id, which
 /// persisted a stack of blank assistant rows for tool rounds (each
 /// round's empty or interim text) and made reloaded sessions show
 /// empty bubbles. Replacing the row keeps exactly one assistant
-/// message per turn â€” the final answer.
+/// message per turn Ă˘â‚¬â€ť the final answer.
 ///
 /// `resolved` is the personality bundle computed at the start of
 /// the turn; we use its `personality_id` + `name` (not the session
@@ -544,7 +544,7 @@ async fn persist(session: &mut Session, mode: PersistMode) {
 /// Stamp the `lastTurn` marker onto the session and persist. Called on
 /// every terminal transition (done / error) so the session file becomes a
 /// self-describing record of "the turn with this requestId ended in this
-/// status at this time" â€” independent of the in-process Tauri event bus.
+/// status at this time" Ă˘â‚¬â€ť independent of the in-process Tauri event bus.
 ///
 /// The frontend uses this as a disk-based completion signal when
 /// streaming events don't reach the WebView, so responses still appear
@@ -672,7 +672,7 @@ pub struct ResolvedAgent {
     personality_id: String,
     /// Human-readable label for the agent.
     name: String,
-    /// The agent's role â€” threaded into the tool context so
+    /// The agent's role Ă˘â‚¬â€ť threaded into the tool context so
     /// role-gated tools can check the caller.
     role: AgentRole,
     /// The agent's system prompt (code constant for the Orchestrator,
@@ -1000,7 +1000,7 @@ async fn run_turn_core(
     let mut goal_turns = 0usize;
     let mut stall_ring: VecDeque<StallProbe> = VecDeque::with_capacity(STALL_WINDOW);
     // Subagents get a reduced toolset: no `delegate_subagent` (prevents
-    // unbounded recursion — only the Orchestrator may spawn) and no
+    // unbounded recursion â€” only the Orchestrator may spawn) and no
     // role-gated meta-tools that aren't theirs.
     let tools = if resolved.role == AgentRole::Orchestrator {
         ToolSpec::all()
@@ -1241,7 +1241,7 @@ fn error_vocab(e: &AgentTurnError) -> (&'static str, String) {
         AgentTurnError::Auth(m) => ("auth", m.clone()),
         AgentTurnError::RateLimited(_) => (
             "rate_limited",
-            "Provider rate limit hit â€” try again shortly".into(),
+            "Provider rate limit hit Ă˘â‚¬â€ť try again shortly".into(),
         ),
         AgentTurnError::Network(m) => ("network", m.clone()),
         AgentTurnError::Provider(m) => ("provider", m.clone()),
@@ -1499,11 +1499,11 @@ async fn execute_tool_batch(
 ) -> Result<(), ()> {
     // Split inline vs dispatch. We preserve the original call order in
     // the final `messages` history so the model still sees a natural
-    // tool_call ↔ tool_result pairing per call id.
+    // tool_call â†” tool_result pairing per call id.
     let mut inline_calls: Vec<&ToolCall> = Vec::new();
     let mut dispatch_calls: Vec<&ToolCall> = Vec::new();
     for call in calls {
-        if call.name == "delegate_subagent" {
+        if call.name == "delegate_subagent" || call.name == "delegate_subagents" {
             dispatch_calls.push(call);
         } else {
             inline_calls.push(call);
@@ -1547,9 +1547,10 @@ async fn execute_tool_batch(
     }
     let Some(dispatch_ctx) = dispatch.cloned() else {
         // No dispatch context means this turn can't spawn subagents.
-        // The model emitted `delegate_subagent` calls anyway; the tool
-        // itself will have returned the role-gate denial, so the
-        // call-by-call history already reflects that. Nothing to do.
+        // The model emitted `delegate_subagent` / `delegate_subagents`
+        // calls anyway; the tool itself will have returned the
+        // role-gate denial, so the call-by-call history already
+        // reflects that. Nothing to do.
         return Ok(());
     };
 
@@ -1557,71 +1558,269 @@ async fn execute_tool_batch(
     // message can carry the same header. We pre-allocate strings and
     // fill them in as the JoinSet resolves.
     let mut join_set: tokio::task::JoinSet<DispatchOutcome> = tokio::task::JoinSet::new();
-    // (orchestrator_call_id, subagent_id, display_name) — the order
+    // (orchestrator_call_id, subagent_id, display_name) â€” the order
     // here is the order the model emitted the dispatches, used to
     // sort the final results so the combined summary reads in the
-    // natural order.
+    // natural order. For the plural `delegate_subagents` tool one
+    // call_id produces N triples (one per dispatched subagent); the
+    // dedup at message-emit time keys the synthetic tool message by
+    // the call_id alone so the model sees one tool result per
+    // `tool_call`, regardless of fan-out.
     let mut dispatch_ids: Vec<(String, String, String)> = Vec::with_capacity(dispatch_calls.len());
     for call in &dispatch_calls {
-        // Map the orchestrator's call id → subagent id, recorded by
-        // `tool_delegate_subagent` when it inserted the registry row.
-        let Some(sub_id) = dispatch_ctx
-            .dispatch_call_index
-            .get(&call.id)
-            .map(|e| e.value().clone())
-        else {
-            // No registry row → the dispatch was rejected by the
-            // role-gate or the resolve step. The per-call history
-            // already carries the denial; nothing to do here.
-            continue;
-        };
-        let display_name = dispatch_ctx
-            .subagents
-            .get(&sub_id)
-            .map(|r| r.name.clone())
-            .unwrap_or_else(|| sub_id.clone());
-        // Reserve a permit up front; if the cap is full, the next
-        // dispatch awaits the previous one finishing. We use
-        // `acquire_owned()` so the permit travels into the task.
-        let permit = dispatch_ctx
-            .subagent_semaphore
-            .clone()
-            .acquire_owned()
-            .await;
-        // The semaphore is never closed in practice; an error here
-        // means the runtime is shutting down, which we treat as a
-        // dispatch failure (the loop's outer cancel will pick it up).
-        let Ok(permit) = permit else {
-            if let Some(mut rec) = dispatch_ctx.subagents.get_mut(&sub_id) {
-                rec.status = crate::agent::SubagentStatus::Error;
-                rec.finished_at = Some(now_iso());
-                rec.error = Some("subagent semaphore closed".to_string());
+        // -- Register the dispatch (or all sub-dispatches for the
+        //    plural tool) against the dispatch context. This is the
+        //    step that populates `dispatch_call_index` and the
+        //    registry; the JoinSet spawn below reads from it.
+        //
+        // We call the registration helpers directly instead of going
+        // through `execute_tool_with_id` for two reasons:
+        //   1. Bypassing `execute_one` skips the per-call
+        //      `role: "tool"` message it would write â€” the synthetic
+        //      batch message at the end of this loop covers it.
+        //   2. The plural tool fans one model-side call into N
+        //      subagent registrations under the same call_id; the
+        //      singular `execute_tool_with_id` arm of the executor
+        //      doesn't know how to do that.
+        //
+        // We still emit the same `agent-tool-start` /
+        // `agent-tool-result` events and `push_activity` row that
+        // `execute_one` would, so the UI's tool log keeps showing
+        // the per-dispatch "queued subagent â€¦" entries.
+        sink.emit(
+            "agent-tool-start",
+            json!(ToolStartEvent {
+                request_id,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            }),
+        );
+        // Wrap the helper-result types in a uniform shape the
+        // success / failure / no-op branches below can switch on.
+        // The singular tool returns `Some(r)` or `None`; the plural
+        // tool returns a `(registered, failures)` pair.
+        enum RegOutcome {
+            Registered(Vec<crate::tools::RegisteredDispatch>),
+            None,
+            Failed(String),
+        }
+        let outcome: RegOutcome = match call.name.as_str() {
+            "delegate_subagent" => {
+                match crate::tools::register_one_dispatch(
+                    &dispatch_ctx,
+                    call.arguments
+                        .get("personality")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    call.arguments
+                        .get("task")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    &call.id,
+                )
+                .await
+                {
+                    Ok(Some(r)) => RegOutcome::Registered(vec![r]),
+                    Ok(None) => RegOutcome::None,
+                    Err(e) => RegOutcome::Failed(e),
+                }
             }
-            continue;
-        };
-        let dc = dispatch_ctx.clone();
-        let call_id = call.id.clone();
-        let call_id_for_dispatch = call_id.clone();
-        let sub_id_for_task = sub_id.clone();
-        let sub_id_for_outcome = sub_id.clone();
-        let task = call
-            .arguments
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        dispatch_ids.push((call_id, sub_id, display_name));
-        join_set.spawn(async move {
-            let result = dispatch_subagent_turn(dc, sub_id_for_task, task, permit).await;
-            DispatchOutcome {
-                call_id: call_id_for_dispatch,
-                sub_id: sub_id_for_outcome,
-                result,
+            "delegate_subagents" => {
+                let (registered, failures) = crate::tools::register_plural_dispatches(
+                    &dispatch_ctx,
+                    &call.arguments,
+                    &call.id,
+                )
+                .await;
+                if registered.is_empty() {
+                    // Surface the per-entry failures as a single
+                    // error string so the model sees a clear "what
+                    // went wrong" message instead of an empty
+                    // success.
+                    let summary = if failures.is_empty() {
+                        "delegate_subagents: `dispatches` is empty or malformed".to_string()
+                    } else {
+                        format!("delegate_subagents: ({})", failures.join("; "))
+                    };
+                    RegOutcome::Failed(summary)
+                } else {
+                    RegOutcome::Registered(registered)
+                }
             }
-        });
+            other => RegOutcome::Failed(format!(
+                "execute_tool_batch: unexpected dispatch tool {:?}",
+                other
+            )),
+        };
+        let registered = match outcome {
+            RegOutcome::Registered(rs) => rs,
+            RegOutcome::None => {
+                // Singular tool, target didn't resolve. Push a
+                // per-call `role: "tool"` denial and emit the
+                // result event, then skip the JoinSet spawn.
+                let summary =
+                    "delegate_subagent: target did not resolve to a subagent role".to_string();
+                push_activity(
+                    session,
+                    &call.name,
+                    summary.clone(),
+                    ToolActivityStatus::Error,
+                    Some(request_id),
+                    Some(&call.arguments),
+                );
+                persist(session, persist_mode).await;
+                messages.push(ToolChatMessage {
+                    role: "tool".into(),
+                    content: summary.clone(),
+                    tool_call_id: Some(call.id.clone()),
+                    tool_calls: Vec::new(),
+                });
+                sink.emit(
+                    "agent-tool-result",
+                    json!(ToolResultEvent {
+                        request_id,
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        ok: false,
+                        summary,
+                        status: status_name(&ToolActivityStatus::Error),
+                    }),
+                );
+                continue;
+            }
+            RegOutcome::Failed(e) => {
+                push_activity(
+                    session,
+                    &call.name,
+                    e.clone(),
+                    ToolActivityStatus::Error,
+                    Some(request_id),
+                    Some(&call.arguments),
+                );
+                persist(session, persist_mode).await;
+                messages.push(ToolChatMessage {
+                    role: "tool".into(),
+                    content: e.clone(),
+                    tool_call_id: Some(call.id.clone()),
+                    tool_calls: Vec::new(),
+                });
+                sink.emit(
+                    "agent-tool-result",
+                    json!(ToolResultEvent {
+                        request_id,
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        ok: false,
+                        summary: e,
+                        status: status_name(&ToolActivityStatus::Error),
+                    }),
+                );
+                continue;
+            }
+        };
+
+        // Build a "queued N subagent(s)" summary for the activity
+        // log and the per-call `agent-tool-result` event. The
+        // singular tool registers 1 entry; the plural registers N.
+        let names: Vec<String> = registered
+            .iter()
+            .map(|r| r.personality_name.clone())
+            .collect();
+        let summary = if names.len() == 1 {
+            format!(
+                "queued subagent {} ({}) â€” running in background",
+                registered[0].request_id, names[0]
+            )
+        } else {
+            let preview = if names.len() <= 4 {
+                names.join(", ")
+            } else {
+                format!("{}, â€¦and {} more", names[..4].join(", "), names.len() - 4)
+            };
+            format!(
+                "queued {} subagents ({}) â€” running in background",
+                registered.len(),
+                preview
+            )
+        };
+        push_activity(
+            session,
+            &call.name,
+            summary.clone(),
+            ToolActivityStatus::Ran,
+            Some(request_id),
+            Some(&call.arguments),
+        );
+        persist(session, persist_mode).await;
+        sink.emit(
+            "agent-tool-result",
+            json!(ToolResultEvent {
+                request_id,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                ok: true,
+                summary: summary.clone(),
+                status: status_name(&ToolActivityStatus::Ran),
+            }),
+        );
+
+        // Spawn one JoinSet task per registered subagent. Each task
+        // acquires its own semaphore permit (queued behind any
+        // currently-running siblings) and runs the subagent turn to
+        // completion. The orchestrator turn awaits the full batch.
+        for reg in registered {
+            let sub_id = reg.request_id.clone();
+            let display_name = reg.personality_name.clone();
+            // The per-subagent task text was stored in the
+            // registry's `task` field by `register_one_dispatch` /
+            // `register_plural_dispatches`. Reading it back from
+            // there keeps the registration side as the single source
+            // of truth.
+            let task = dispatch_ctx
+                .subagents
+                .get(&sub_id)
+                .map(|r| r.task.clone())
+                .unwrap_or_default();
+            // Reserve a permit up front; if the cap is full, the
+            // next dispatch awaits the previous one finishing. We
+            // use `acquire_owned()` so the permit travels into the
+            // task.
+            let permit = dispatch_ctx
+                .subagent_semaphore
+                .clone()
+                .acquire_owned()
+                .await;
+            // The semaphore is never closed in practice; an error
+            // here means the runtime is shutting down, which we
+            // treat as a dispatch failure (the loop's outer cancel
+            // will pick it up).
+            let Ok(permit) = permit else {
+                if let Some(mut rec) = dispatch_ctx.subagents.get_mut(&sub_id) {
+                    rec.status = crate::agent::SubagentStatus::Error;
+                    rec.finished_at = Some(now_iso());
+                    rec.error = Some("subagent semaphore closed".to_string());
+                }
+                continue;
+            };
+            let dc = dispatch_ctx.clone();
+            let call_id = call.id.clone();
+            let call_id_for_outcome = call_id.clone();
+            let sub_id_for_task = sub_id.clone();
+            let sub_id_for_outcome = sub_id.clone();
+            dispatch_ids.push((call_id, sub_id, display_name));
+            join_set.spawn(async move {
+                let result = dispatch_subagent_turn(dc, sub_id_for_task, task, permit).await;
+                DispatchOutcome {
+                    call_id: call_id_for_outcome,
+                    sub_id: sub_id_for_outcome,
+                    result,
+                }
+            });
+        }
     }
 
-    // Await all admitted dispatches. We never abandon a queued task —
+    // Await all admitted dispatches. We never abandon a queued task â€”
     // the loop's outer cancel (signalled via `in_flight`) is what
     // actually drops futures, and that path is handled inside
     // `dispatch_subagent_turn`.
@@ -1650,11 +1849,21 @@ async fn execute_tool_batch(
     //
     // Provider pairing rules require every assistant `tool_call` to be
     // paired with a `role: "tool"` `tool_call_id`-matched message, so
-    // we emit one such message per dispatch call. The message body is
-    // the same combined batch summary for all of them — the model
-    // gets the full picture from any one row.
+    // we emit one such message per **unique** model-side call id. For
+    // the singular `delegate_subagent` tool each call id appears once
+    // in `dispatch_ids` (one row per dispatch); for the plural
+    // `delegate_subagents` tool a single call id appears N times (one
+    // row per subagent it fanned out to) and we dedup so the model
+    // sees exactly one tool result per `tool_call`, regardless of
+    // fan-out. The message body is the same combined batch summary
+    // for every call id in the batch â€” the model gets the full
+    // picture from any one row.
     let combined = format_batch_summary(&dispatch_ids, &results);
+    let mut emitted_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (call_id, _, _) in &dispatch_ids {
+        if !emitted_call_ids.insert(call_id.clone()) {
+            continue;
+        }
         // Each dispatch call id is the orchestrator-side `call.id` the
         // model assigned (the dispatcher uses it as the synthetic
         // tool_call_id pairing key for the provider).
@@ -1667,7 +1876,7 @@ async fn execute_tool_batch(
     }
     // Drop the index entries now that the batch is done; the next
     // LLM round will rebuild it for the next batch.
-    for (call_id, _, _) in &dispatch_ids {
+    for call_id in &emitted_call_ids {
         dispatch_ctx.dispatch_call_index.remove(call_id);
     }
     Ok(())
@@ -1679,7 +1888,7 @@ async fn execute_tool_batch(
 #[derive(Debug)]
 struct DispatchOutcome {
     /// Orchestrator-side `call.id` the model assigned to the
-    /// `delegate_subagent` invocation — used as the `tool_call_id`
+    /// `delegate_subagent` invocation â€” used as the `tool_call_id`
     /// on the synthetic tool message.
     call_id: String,
     /// Subagent `sub-<uuid>` id; used to correlate the result with
@@ -1856,7 +2065,10 @@ fn format_batch_summary(
                 }
             })
             .unwrap_or_else(|| "missing".to_string());
-        lines.push(format!("  • {} ({}) — {}", sub_id, display_name, status));
+        lines.push(format!(
+            "  â€˘ {} ({}) â€” {}",
+            sub_id, display_name, status
+        ));
     }
     lines.join("\n")
 }
@@ -2401,7 +2613,7 @@ mod tests {
         handle.await.unwrap();
 
         // The provider request contains the health message as a user turn
-        // (drained exactly once — the inbox is empty afterwards).
+        // (drained exactly once â€” the inbox is empty afterwards).
         let requests = completer.requests();
         assert_eq!(requests.len(), 1);
         let user_msgs: Vec<&str> = requests[0]
