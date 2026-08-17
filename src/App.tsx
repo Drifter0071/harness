@@ -6,8 +6,9 @@ import { Settings } from "./components/Settings";
 import { Chat } from "./components/Chat";
 import { AgentManager } from "./components/AgentManager";
 import { WindowManager } from "./components/WindowManager";
+import { BatchApprovalCard } from "./components/BatchApprovalCard";
 import { useStore } from "./lib/store";
-import { ipc } from "./lib/ipc";
+import { ipc, agentEvents } from "./lib/ipc";
 import {
   useProjectLifecycle,
   flushPendingSave,
@@ -38,12 +39,40 @@ function usePersonalitiesBootstrap() {
   }, [setPersonalities]);
 }
 
+/** Subscribe to `todo_changed` events and mirror them into the store.
+ *  Spec 2026-08-14--agent-todo-list.md §4. */
+function useTodoEvents() {
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const hydratedTodosFor = useStore((s) => s.hydratedTodosFor);
+  useEffect(() => {
+    // Swallow the registration failure the same way the other
+    // listeners do — `npm run dev` (browser mode) has no Tauri bus.
+    const p = agentEvents.onTodoChanged((e) => {
+      // Ignore events for a different session (shouldn't happen,
+      // but defensive against routing edge cases).
+      if (
+        activeSessionId &&
+        e.sessionId !== activeSessionId &&
+        e.sessionId !== hydratedTodosFor
+      ) {
+        return;
+      }
+      useStore.getState().setTodos(e.list);
+    });
+    p.catch(() => {});
+    return () => {
+      p.then((unsub) => unsub()).catch(() => {});
+    };
+  }, [activeSessionId, hydratedTodosFor]);
+}
+
 function App() {
   const { settingsOpen, subagents, agentManagerOpen, chatRatio } = useStore();
   useProjectLifecycle();
   useModelBootstrap();
   usePersonalitiesBootstrap();
   useSubagentManager();
+  useTodoEvents();
 
   useEffect(() => {
     const handler = () => {
@@ -111,12 +140,20 @@ function App() {
             <Chat />
           </div>
           {/* Subagent region (right). Empty until the first
-           *  subagent spawns; the equal-grid tiles own the rest. */}
+           *  subagent spawns; the equal-grid tiles own the rest.
+           *  `BatchApprovalCard` floats above the tiles so parallel
+           *  subagent approval prompts collapse into one card
+           *  (spec `2026-08-14--parallel-subagent-dispatch`); it
+           *  renders null when fewer than two subagents in the
+           *  current batch are waiting. */}
           {tiling && (
-            <WindowManager
-              width={split.subagentWidth}
-              height={contentSize.height}
-            />
+            <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+              <BatchApprovalCard />
+              <WindowManager
+                width={split.subagentWidth}
+                height={contentSize.height}
+              />
+            </div>
           )}
         </div>
       </div>

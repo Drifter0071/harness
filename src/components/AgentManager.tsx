@@ -22,6 +22,7 @@ import { useStore } from "../lib/store";
 import { ipc } from "../lib/ipc";
 import {
   DEFAULT_PROMPTS,
+  PARALLEL_KNOB_BOUNDS,
   type AgentPersonality,
   type AgentRole,
   type PersonalityRoster,
@@ -112,6 +113,17 @@ export function AgentManager() {
     setDraft((d) => (d ? { ...d, defaultPersonalityId: id } : d));
   };
 
+  const setKnob = (
+    key: "maxConcurrentSubagents" | "goalMaxTurns",
+    raw: string,
+  ) => {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isNaN(parsed)) return;
+    const bounds = PARALLEL_KNOB_BOUNDS[key];
+    const clamped = Math.max(bounds.min, Math.min(bounds.max, parsed));
+    setDraft((d) => (d ? { ...d, [key]: clamped } : d));
+  };
+
   const handleRoleChange = (index: number, role: SubagentRole) => {
     setDraft((d) => {
       if (!d) return d;
@@ -179,6 +191,56 @@ export function AgentManager() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          {draft && (
+            <div className="bg-surface-2 border border-border-subtle rounded p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <Bot size={12} className="text-white-30" />
+                <span className="text-[10px] uppercase tracking-[0.14em] text-white-15">
+                  Orchestrator dispatch
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="space-y-1">
+                  <span className="text-[10px] uppercase tracking-[0.14em] text-white-15">
+                    Max concurrent subagents
+                  </span>
+                  <input
+                    type="number"
+                    min={PARALLEL_KNOB_BOUNDS.maxConcurrentSubagents.min}
+                    max={PARALLEL_KNOB_BOUNDS.maxConcurrentSubagents.max}
+                    value={draft.maxConcurrentSubagents}
+                    onChange={(e) =>
+                      setKnob("maxConcurrentSubagents", e.target.value)
+                    }
+                    className="w-full bg-surface-3 border border-border-subtle rounded px-2 py-1.5 text-[12px] text-white outline-none focus:border-border-strong"
+                    aria-label="Max concurrent subagents"
+                    title={`${PARALLEL_KNOB_BOUNDS.maxConcurrentSubagents.min}–${PARALLEL_KNOB_BOUNDS.maxConcurrentSubagents.max} parallel subagent turns per Orchestrator round`}
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[10px] uppercase tracking-[0.14em] text-white-15">
+                    Max goal-mode turns
+                  </span>
+                  <input
+                    type="number"
+                    min={PARALLEL_KNOB_BOUNDS.goalMaxTurns.min}
+                    max={PARALLEL_KNOB_BOUNDS.goalMaxTurns.max}
+                    value={draft.goalMaxTurns}
+                    onChange={(e) => setKnob("goalMaxTurns", e.target.value)}
+                    className="w-full bg-surface-3 border border-border-subtle rounded px-2 py-1.5 text-[12px] text-white outline-none focus:border-border-strong"
+                    aria-label="Max goal-mode continuation turns"
+                    title={`${PARALLEL_KNOB_BOUNDS.goalMaxTurns.min}–${PARALLEL_KNOB_BOUNDS.goalMaxTurns.max} continuation rounds before a goal-mode subagent is capped`}
+                  />
+                </label>
+              </div>
+              <p className="text-[10px] text-white-15 leading-relaxed">
+                The Orchestrator dispatches independent subagents in parallel;
+                excess sits in a FIFO queue. Goal-mode subagents keep working
+                across continuation rounds up to this cap before they stop.
+              </p>
+            </div>
+          )}
+
           {draft?.personalities.map((p, i) => {
             const isDefault =
               draft.defaultPersonalityId === p.id;

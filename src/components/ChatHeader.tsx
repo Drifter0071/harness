@@ -5,6 +5,7 @@
 import { useLayoutEffect, useRef } from "react";
 import { useStore } from "../lib/store";
 import { capabilitiesFor } from "../lib/model-capabilities";
+import { PlanStrip } from "./PlanStrip";
 
 const fmt = (n: number) => n.toLocaleString("en-US");
 
@@ -143,6 +144,13 @@ export function ChatHeader() {
           )}
         </div>
       )}
+
+      {/* Row 3: plan strip (spec 2026-08-14--agent-todo-list.md).
+          Hidden when the list is empty. Sits between the
+          progress bar (row 1) and the cumulative row (row 2)
+          so the strip's hover affordances don't fight with the
+          session-window row's narrower padding. */}
+      <PlanStrip />
     </div>
   );
 }

@@ -1,8 +1,8 @@
 mod agent;
 mod agent_loop;
 mod capabilities;
-mod compact;
 mod commands;
+mod compact;
 mod hci;
 mod health_agent;
 mod llm_client;
@@ -11,6 +11,7 @@ mod personalities;
 mod secrets;
 mod session;
 mod session_watcher;
+mod todos;
 mod tools;
 mod web_search;
 
@@ -120,6 +121,11 @@ pub fn run() {
             commands::list_subagents,
             // Bip mascot state (bip-mascot-tool spec)
             commands::get_bip_state,
+            // Todo list (agent-todo-list spec)
+            todos::edit_todo,
+            todos::append_todo,
+            todos::remove_todo,
+            todos::clear_todo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Harness");

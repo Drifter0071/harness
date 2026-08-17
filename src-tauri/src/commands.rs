@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +15,19 @@ use crate::personalities::{AgentPersonality, PersonalityRoster};
 use crate::secrets::SecretStore;
 use crate::tools::BipState;
 use tokio::sync::oneshot;
+
+// ============================= Re-exports =============================
+//
+// Some IPC commands live in their own modules (e.g. `todos`) so the
+// underlying logic doesn't bloat this file. `lib.rs` references them
+// via the `todos` module path; the `pub use` below keeps backward
+// compatibility for any in-crate callers that still reach for
+// `commands::edit_todo` etc. The `tauri::command` macro does NOT
+// follow re-exports for the `__cmd__` name lookup, so the registration
+// list uses the original module path.
+//
+#[allow(unused_imports)]
+pub use crate::todos::{append_todo, clear_todo, edit_todo, remove_todo};
 
 // ============================= App State =============================
 
@@ -51,6 +65,13 @@ pub struct AppState {
     /// Agent delivers messages via the `subagent_message` tool; each
     /// subagent's turn drains its own inbox every LLM round.
     pub subagent_inbox: Arc<dashmap::DashMap<String, tokio::sync::Mutex<Vec<String>>>>,
+    /// Per-session write lock for the todo list (spec
+    /// `2026-08-14--agent-todo-list.md` §5). Serializes concurrent
+    /// agent + user writes to the same session's todo list so
+    /// `load → mutate → save` never races. Lazily inserts per
+    /// `(project_path, session_id)` entries; the inner mutex is
+    /// the actual serialization point.
+    pub todo_locks: Arc<dashmap::DashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AppState {
@@ -65,6 +86,7 @@ impl AppState {
             bip_state: Arc::new(RwLock::new(BipState::default())),
             subagents: Arc::new(dashmap::DashMap::new()),
             subagent_inbox: Arc::new(dashmap::DashMap::new()),
+            todo_locks: Arc::new(dashmap::DashMap::new()),
         }
     }
 }
@@ -530,6 +552,13 @@ pub async fn run_agent_turn(
     // registry, inboxes, and the runner. This is what lets the
     // `delegate_subagent` / `subagent_message` tools work from inside
     // the agent loop.
+    //
+    // The goal-mode continuation cap is read from the global personality
+    // roster (spec `2026-08-14--parallel-subagent-dispatch`); the
+    // roster's `enforce_invariants` clamps the value into range, so a
+    // corrupt or out-of-range file falls back to the documented default
+    // rather than aborting the turn.
+    let roster = crate::personalities::load_personalities().await?;
     let dispatch = crate::tools::SubagentDispatchContext {
         subagents: state.subagents.clone(),
         inbox: state.subagent_inbox.clone(),
@@ -542,6 +571,12 @@ pub async fn run_agent_turn(
         reasoning_effort,
         chat_model_id: model_id.clone(),
         request_id: request_id.clone(),
+        goal_max_turns: roster.goal_max_turns,
+        subagent_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            roster.max_concurrent_subagents as usize,
+        )),
+        dispatch_call_index: Arc::new(DashMap::new()),
+        subagent_cancel: Arc::new(DashMap::new()),
     };
 
     crate::agent_loop::run_agent_turn(

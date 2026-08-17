@@ -4,8 +4,8 @@
 //! one-shot LLM call, then persists the updated session and emits a
 //! `chat-compacted` Tauri event so the frontend can surface the result.
 
-use std::sync::Arc;
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -51,7 +51,11 @@ what the user asked about.";
 fn build_summary_user_prompt(foldable: &[&Message]) -> String {
     let mut text = String::from("Summarize the following conversation:\n\n");
     for m in foldable {
-        let role = if m.role == "user" { "User" } else { "Assistant" };
+        let role = if m.role == "user" {
+            "User"
+        } else {
+            "Assistant"
+        };
         text.push_str(&format!("[{}]\n{}\n\n", role, m.content));
     }
     text
@@ -69,9 +73,7 @@ fn is_refusal(content: &str) -> bool {
 /// Whether the LLM response looks like a valid summary (spec §6.3 step 5.2).
 fn is_valid_summary(content: &str) -> bool {
     let trimmed = content.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 5 * 1024
-        && !is_refusal(trimmed)
+    !trimmed.is_empty() && trimmed.len() <= 5 * 1024 && !is_refusal(trimmed)
 }
 
 /// The core compaction operation. Folds `session.messages` into a single

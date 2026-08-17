@@ -33,10 +33,10 @@ use crate::models::ReasoningEffort;
 use crate::personalities::AgentPersonality;
 use crate::secrets::SecretStore;
 use crate::session::{
-    save_session, CommandMode, LastTurn, Message, Session, TokenStats, ToolActivity,
+    save_session, CommandMode, LastTurn, Message, Session, TodoList, TokenStats, ToolActivity,
     ToolActivityStatus,
 };
-use crate::tools::{execute_tool, SubagentDispatchContext, ToolContext, ToolResult};
+use crate::tools::{execute_tool_with_id, SubagentDispatchContext, ToolContext, ToolResult};
 
 /// Hard cap on LLM rounds inside one turn (each round may execute tools).
 const MAX_ROUNDS: usize = 24;
@@ -48,8 +48,6 @@ const STALL_WINDOW: usize = 3;
 const MUTATING_TOOLS: [&str; 3] = ["write_file", "edit_file", "run_command"];
 /// Goal-mode continuation marker the model appends to keep working.
 const CONTINUE_MARKER: &str = "[continue]";
-/// Cap on goal-mode continuation turns after the first.
-const GOAL_MAX_TURNS: usize = 8;
 
 /// Whether a turn's session mutations are written to disk. Chat turns
 /// (`Real`) persist to `<project>/.harness/sessions/`; dispatched
@@ -303,7 +301,15 @@ impl Drop for PendingApprovalGuard {
 
 fn requires_approval(mode: &CommandMode, name: &str) -> bool {
     match mode {
-        CommandMode::Commands => name == "run_command",
+        CommandMode::Commands => {
+            // `run_command` is the canonical shell-exec gate.
+            // `todo_remove` / `todo_clear` are destructive in the
+            // sense that they wipe items the user may have edited;
+            // surface them for approval in Commands mode so the
+            // user sees what's being changed. (Spec
+            // 2026-08-14--agent-todo-list.md §2.)
+            name == "run_command" || name == "todo_remove" || name == "todo_clear"
+        }
         CommandMode::Yolo => false,
     }
 }
@@ -342,7 +348,12 @@ fn history_from_session(session: &Session) -> Vec<ToolChatMessage> {
         .collect()
 }
 
-fn build_system_prompt(orchestrator_prompt: &str, workspace: &str, goal_mode: bool) -> String {
+fn build_system_prompt(
+    orchestrator_prompt: &str,
+    workspace: &str,
+    goal_mode: bool,
+    todos: &crate::session::TodoList,
+) -> String {
     let mut prompt = orchestrator_prompt.to_string();
     prompt.push_str("\n\nWorkspace root: ");
     prompt.push_str(workspace);
@@ -359,7 +370,41 @@ fn build_system_prompt(orchestrator_prompt: &str, workspace: &str, goal_mode: bo
             CONTINUE_MARKER
         ));
     }
+    // Todo list (spec 2026-08-14--agent-todo-list.md). Injected as
+    // a compact block in the system message so the model sees the
+    // current plan on every turn but it isn't treated as fresh user
+    // input. Empty list → no block, no noise.
+    if !todos.items.is_empty() {
+        let done = todos
+            .items
+            .iter()
+            .filter(|i| i.status == crate::session::TodoStatus::Done)
+            .count();
+        prompt.push_str(&format!(
+            "\n\n[Plan: {}/{} done]\n{}",
+            done,
+            todos.items.len(),
+            format_todo_block(&todos.items),
+        ));
+    }
     prompt
+}
+
+/// Render a todo list as the compact block the LLM sees each turn.
+/// Each item is one line: a marker (✓ done, → in_progress, ⏵
+/// pending) + the item text. Stable so model diffs over multiple
+/// turns don't trip on formatting churn.
+fn format_todo_block(items: &[crate::session::TodoItem]) -> String {
+    let mut out = String::new();
+    for item in items {
+        let marker = match item.status {
+            crate::session::TodoStatus::Done => "✓",
+            crate::session::TodoStatus::InProgress => "→",
+            crate::session::TodoStatus::Pending => "⏵",
+        };
+        out.push_str(&format!("  {} {}\n", marker, item.text));
+    }
+    out
 }
 
 fn build_request(
@@ -856,6 +901,7 @@ async fn run_subagent_turn_inner(
         last_turn: None,
         compact: None,
         compact_threshold: 0.8,
+        todos: TodoList::default(),
     };
 
     let outcome = run_turn_core(
@@ -997,7 +1043,12 @@ async fn run_turn_core(
         }
 
         // -- Provider call, raced against cancellation --
-        let system_prompt = build_system_prompt(&resolved.system_prompt, workspace, goal_mode);
+        let system_prompt = build_system_prompt(
+            &resolved.system_prompt,
+            workspace,
+            goal_mode,
+            &session.todos,
+        );
         let request = build_request(
             &resolved.model_id,
             system_prompt,
@@ -1109,35 +1160,22 @@ async fn run_turn_core(
                 tool_call_id: None,
                 tool_calls: outcome.tool_calls.clone(),
             });
-            for call in &outcome.tool_calls {
-                let allowed = gate_tool(
-                    request_id,
-                    session,
-                    mode, // &CommandMode (the shadowed PersistMode is named persist_mode)
-                    call,
-                    &mut messages,
-                    sink,
-                    pending_approvals,
-                    &mut cancel_rx,
-                )
-                .await?;
-                if !allowed {
-                    continue;
-                }
-                execute_one(
-                    request_id,
-                    session,
-                    workspace,
-                    resolved,
-                    call,
-                    &mut messages,
-                    sink,
-                    &mut stall_ring,
-                    persist_mode,
-                    dispatch,
-                )
-                .await;
-            }
+            execute_tool_batch(
+                request_id,
+                session,
+                mode,
+                workspace,
+                resolved,
+                &outcome.tool_calls,
+                &mut messages,
+                sink,
+                pending_approvals,
+                &mut stall_ring,
+                persist_mode,
+                dispatch,
+                &mut cancel_rx,
+            )
+            .await?;
             if let Some(name) = detect_stall(&stall_ring) {
                 return Ok(finish_error(
                     session,
@@ -1154,7 +1192,16 @@ async fn run_turn_core(
         // -- No tool calls: goal continuation or done --
         if has_marker {
             goal_turns += 1;
-            if goal_turns > GOAL_MAX_TURNS {
+            // The cap is roster-driven (spec
+            // `2026-08-14--parallel-subagent-dispatch`). We pull it from
+            // the dispatch context when present; otherwise we fall back
+            // to the documented default (the only path that hits this
+            // branch without a dispatch is a unit test that doesn't
+            // build a real `commands::run_agent_turn` context).
+            let goal_max_turns = dispatch
+                .map(|d| d.goal_max_turns)
+                .unwrap_or(crate::personalities::DEFAULT_GOAL_MAX_TURNS);
+            if goal_turns > goal_max_turns {
                 return Ok(finish_error(
                     session,
                     "loop_cap",
@@ -1179,7 +1226,8 @@ async fn run_turn_core(
         // file reflects completion even if the in-process Tauri event never
         // reaches the WebView.
         let reasoning = (!outcome.reasoning.is_empty()).then(|| outcome.reasoning.clone());
-        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning, persist_mode).await;
+        mark_turn_complete_with_reasoning(session, request_id, "done", reasoning, persist_mode)
+            .await;
         return Ok(TurnFinish::Done {
             content: final_text,
             reasoning: outcome.reasoning,
@@ -1345,7 +1393,10 @@ async fn execute_one(
     if let Some(d) = dispatch {
         ctx = ctx.with_subagent(d.clone());
     }
-    let result = match execute_tool(&ctx, &call.name, &call.arguments).await {
+    // Todo tools (spec 2026-08-14--agent-todo-list.md) need the
+    // active session id to know which session's TodoList to mutate.
+    ctx = ctx.with_session_id(session.id.clone());
+    let result = match execute_tool_with_id(&ctx, &call.name, &call.arguments, &call.id).await {
         Ok(r) => r,
         Err(e) => ToolResult {
             ok: false,
@@ -1411,6 +1462,403 @@ fn status_name(s: &ToolActivityStatus) -> &'static str {
         ToolActivityStatus::Denied => "denied",
         ToolActivityStatus::Error => "error",
     }
+}
+
+// -- Parallel tool batch (spec 2026-08-14--parallel-subagent-dispatch) --
+//
+// Splits a round's tool calls into two groups:
+//   - inline calls: anything except `delegate_subagent`; run sequentially
+//     through the existing `gate_tool` + `execute_one` pipeline so the
+//     model sees a one-to-one tool result per call.
+//   - dispatch calls: only `delegate_subagent`; admitted to a `JoinSet`
+//     gated by `dispatch.subagent_semaphore` (cap = roster
+//     `max_concurrent_subagents`). Excess dispatches queue and start as
+//     permits free. After all dispatches resolve, their summaries are
+//     folded into one combined tool message and pushed to the model's
+//     `messages` history.
+//
+// The orchestrator turn awaits the full batch (admitted + queued) so
+// the next LLM round always sees the answers, while still letting the
+// dispatches run concurrently under the cap.
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_tool_batch(
+    request_id: &str,
+    session: &mut Session,
+    mode: &CommandMode,
+    workspace: &str,
+    resolved: &ResolvedAgent,
+    calls: &[ToolCall],
+    messages: &mut Vec<ToolChatMessage>,
+    sink: &Arc<dyn AgentEventSink>,
+    pending_approvals: &Arc<DashMap<String, oneshot::Sender<bool>>>,
+    stall_ring: &mut VecDeque<StallProbe>,
+    persist_mode: PersistMode,
+    dispatch: Option<&SubagentDispatchContext>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<(), ()> {
+    // Split inline vs dispatch. We preserve the original call order in
+    // the final `messages` history so the model still sees a natural
+    // tool_call ↔ tool_result pairing per call id.
+    let mut inline_calls: Vec<&ToolCall> = Vec::new();
+    let mut dispatch_calls: Vec<&ToolCall> = Vec::new();
+    for call in calls {
+        if call.name == "delegate_subagent" {
+            dispatch_calls.push(call);
+        } else {
+            inline_calls.push(call);
+        }
+    }
+
+    // -- Inline calls: serial, like before. --
+    for call in &inline_calls {
+        let allowed = gate_tool(
+            request_id,
+            session,
+            mode,
+            call,
+            messages,
+            sink,
+            pending_approvals,
+            cancel_rx,
+        )
+        .await?;
+        if !allowed {
+            continue;
+        }
+        execute_one(
+            request_id,
+            session,
+            workspace,
+            resolved,
+            call,
+            messages,
+            sink,
+            stall_ring,
+            persist_mode,
+            dispatch,
+        )
+        .await;
+    }
+
+    // -- Dispatch calls: parallel, capped by the subagent semaphore. --
+    if dispatch_calls.is_empty() {
+        return Ok(());
+    }
+    let Some(dispatch_ctx) = dispatch.cloned() else {
+        // No dispatch context means this turn can't spawn subagents.
+        // The model emitted `delegate_subagent` calls anyway; the tool
+        // itself will have returned the role-gate denial, so the
+        // call-by-call history already reflects that. Nothing to do.
+        return Ok(());
+    };
+
+    // Build the synthetic batch summary up front so each per-call tool
+    // message can carry the same header. We pre-allocate strings and
+    // fill them in as the JoinSet resolves.
+    let mut join_set: tokio::task::JoinSet<DispatchOutcome> = tokio::task::JoinSet::new();
+    // (orchestrator_call_id, subagent_id, display_name) — the order
+    // here is the order the model emitted the dispatches, used to
+    // sort the final results so the combined summary reads in the
+    // natural order.
+    let mut dispatch_ids: Vec<(String, String, String)> = Vec::with_capacity(dispatch_calls.len());
+    for call in &dispatch_calls {
+        // Map the orchestrator's call id → subagent id, recorded by
+        // `tool_delegate_subagent` when it inserted the registry row.
+        let Some(sub_id) = dispatch_ctx
+            .dispatch_call_index
+            .get(&call.id)
+            .map(|e| e.value().clone())
+        else {
+            // No registry row → the dispatch was rejected by the
+            // role-gate or the resolve step. The per-call history
+            // already carries the denial; nothing to do here.
+            continue;
+        };
+        let display_name = dispatch_ctx
+            .subagents
+            .get(&sub_id)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| sub_id.clone());
+        // Reserve a permit up front; if the cap is full, the next
+        // dispatch awaits the previous one finishing. We use
+        // `acquire_owned()` so the permit travels into the task.
+        let permit = dispatch_ctx
+            .subagent_semaphore
+            .clone()
+            .acquire_owned()
+            .await;
+        // The semaphore is never closed in practice; an error here
+        // means the runtime is shutting down, which we treat as a
+        // dispatch failure (the loop's outer cancel will pick it up).
+        let Ok(permit) = permit else {
+            if let Some(mut rec) = dispatch_ctx.subagents.get_mut(&sub_id) {
+                rec.status = crate::agent::SubagentStatus::Error;
+                rec.finished_at = Some(now_iso());
+                rec.error = Some("subagent semaphore closed".to_string());
+            }
+            continue;
+        };
+        let dc = dispatch_ctx.clone();
+        let call_id = call.id.clone();
+        let call_id_for_dispatch = call_id.clone();
+        let sub_id_for_task = sub_id.clone();
+        let sub_id_for_outcome = sub_id.clone();
+        let task = call
+            .arguments
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        dispatch_ids.push((call_id, sub_id, display_name));
+        join_set.spawn(async move {
+            let result = dispatch_subagent_turn(dc, sub_id_for_task, task, permit).await;
+            DispatchOutcome {
+                call_id: call_id_for_dispatch,
+                sub_id: sub_id_for_outcome,
+                result,
+            }
+        });
+    }
+
+    // Await all admitted dispatches. We never abandon a queued task —
+    // the loop's outer cancel (signalled via `in_flight`) is what
+    // actually drops futures, and that path is handled inside
+    // `dispatch_subagent_turn`.
+    let mut results: Vec<DispatchOutcome> = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok(outcome) => results.push(outcome),
+            Err(join_err) => {
+                eprintln!(
+                    "[harness] dispatch_subagent_turn task join error: {}",
+                    join_err
+                );
+            }
+        }
+    }
+    // Sort by the order in which `dispatch_ids` saw the calls, so the
+    // batch summary reads in the same order the model emitted them.
+    results.sort_by_key(|o| {
+        dispatch_ids
+            .iter()
+            .position(|(_, sub_id, _)| sub_id == &o.sub_id)
+            .unwrap_or(usize::MAX)
+    });
+
+    // -- Fold results into per-dispatch tool messages. --
+    //
+    // Provider pairing rules require every assistant `tool_call` to be
+    // paired with a `role: "tool"` `tool_call_id`-matched message, so
+    // we emit one such message per dispatch call. The message body is
+    // the same combined batch summary for all of them — the model
+    // gets the full picture from any one row.
+    let combined = format_batch_summary(&dispatch_ids, &results);
+    for (call_id, _, _) in &dispatch_ids {
+        // Each dispatch call id is the orchestrator-side `call.id` the
+        // model assigned (the dispatcher uses it as the synthetic
+        // tool_call_id pairing key for the provider).
+        messages.push(ToolChatMessage {
+            role: "tool".into(),
+            content: combined.clone(),
+            tool_call_id: Some(call_id.clone()),
+            tool_calls: Vec::new(),
+        });
+    }
+    // Drop the index entries now that the batch is done; the next
+    // LLM round will rebuild it for the next batch.
+    for (call_id, _, _) in &dispatch_ids {
+        dispatch_ctx.dispatch_call_index.remove(call_id);
+    }
+    Ok(())
+}
+
+/// What one dispatched subagent turn resolved to, paired with both
+/// ids the orchestrator needs to write the synthetic combined tool
+/// message and update the registry.
+#[derive(Debug)]
+struct DispatchOutcome {
+    /// Orchestrator-side `call.id` the model assigned to the
+    /// `delegate_subagent` invocation — used as the `tool_call_id`
+    /// on the synthetic tool message.
+    call_id: String,
+    /// Subagent `sub-<uuid>` id; used to correlate the result with
+    /// the registry row and the batch summary.
+    sub_id: String,
+    result: DispatchResult,
+}
+
+/// What a single dispatch resolved to. The dispatcher turns the
+/// underlying `TurnFinish` into one of these plus a one-line human
+/// summary the model can read in the combined message.
+#[derive(Debug, Clone)]
+enum DispatchResult {
+    Done {
+        summary: String,
+        content: Option<String>,
+    },
+    Error {
+        kind: String,
+        message: String,
+    },
+}
+
+/// Run one dispatched subagent turn under a held semaphore permit. The
+/// permit is dropped when the future resolves, freeing a slot for the
+/// next queued dispatch. Cancellation propagates via the orchestrator's
+/// `in_flight` cancel watcher (see WP4 for the per-subagent path).
+async fn dispatch_subagent_turn(
+    dispatch: SubagentDispatchContext,
+    request_id: String,
+    task: String,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) -> DispatchResult {
+    // Resolve the personality from the registry row the executor
+    // already inserted; this is cheaper than re-running
+    // `tool_delegate_subagent`'s resolve logic, and it keeps the
+    // registry + the dispatch path in lockstep.
+    let Some(record) = dispatch.subagents.get(&request_id).map(|r| r.clone()) else {
+        return DispatchResult::Error {
+            kind: "missing".into(),
+            message: format!(
+                "subagent registry row vanished for {} before dispatch",
+                request_id
+            ),
+        };
+    };
+    let Some(personality) = crate::personalities::get_personality(&record.personality_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return DispatchResult::Error {
+            kind: "missing".into(),
+            message: format!(
+                "subagent personality {} not in roster at dispatch time",
+                record.personality_id
+            ),
+        };
+    };
+    let resolved = crate::agent_loop::ResolvedAgent::from_personality(
+        &personality,
+        &record
+            .model_id
+            .clone()
+            .unwrap_or_else(|| dispatch.chat_model_id.clone()),
+    );
+
+    // The subagent turn is spawned via the existing
+    // `run_subagent_turn` (which already builds a scratch session,
+    // streams events under the sub- id, and resolves to a
+    // `TurnFinish`). The semaphore permit is held for the lifetime of
+    // the future; dropping it on return frees the slot.
+    //
+    // Cancellation today flows through the shared `agent_in_flight`
+    // map (keyed by `sub-<uuid>`): the existing `cancel_agent` IPC
+    // already targets one subagent without touching siblings, so the
+    // spawned turn sees the cancel at its next await point. The
+    // per-subagent `dispatch.subagent_cancel` watcher is reserved for
+    // a future batch-cancel button; the dispatcher subscribes here so
+    // that hookup is one line away.
+    let _cancel_rx = dispatch
+        .subagent_cancel
+        .get(&request_id)
+        .map(|s| s.value().subscribe());
+
+    let handle = run_subagent_turn(
+        request_id.clone(),
+        resolved,
+        task,
+        dispatch.mode.clone(),
+        dispatch.workspace.clone(),
+        dispatch.sink.clone(),
+        dispatch.pending_approvals.clone(),
+        dispatch.in_flight.clone(),
+        dispatch.completer.clone(),
+        dispatch.reasoning_effort,
+        Some(dispatch.clone()),
+    );
+    let outcome = handle.await;
+
+    match outcome {
+        Ok(TurnFinish::Done {
+            content, reasoning, ..
+        }) => {
+            let summary = if reasoning.is_empty() {
+                format!(
+                    "subagent {} ({}) finished with {} chars",
+                    request_id,
+                    record.name,
+                    content.chars().count()
+                )
+            } else {
+                format!(
+                    "subagent {} ({}) finished with {} chars ({} chars of reasoning)",
+                    request_id,
+                    record.name,
+                    content.chars().count(),
+                    reasoning.chars().count()
+                )
+            };
+            // The registry's `final_content` is patched here because
+            // the orchestrator-facing combined tool message needs the
+            // same body the model will see, and `run_subagent_turn`'s
+            // `finish_and_emit` only emits an event, not the content
+            // onto the record.
+            if let Some(mut rec) = dispatch.subagents.get_mut(&request_id) {
+                rec.final_content = Some(content.clone());
+            }
+            DispatchResult::Done {
+                summary,
+                content: Some(content),
+            }
+        }
+        Ok(TurnFinish::Error { kind, message }) => DispatchResult::Error {
+            kind,
+            message: format!("{}: {}", record.name, message),
+        },
+        Err(e) => DispatchResult::Error {
+            kind: "aborted".into(),
+            message: format!("subagent task panicked/aborted: {}", e),
+        },
+    }
+}
+
+/// Format the combined batch summary the model sees on every per-dispatch
+/// tool message. The order matches the order the model emitted the
+/// dispatch calls.
+fn format_batch_summary(
+    dispatch_ids: &[(String, String, String)],
+    results: &[DispatchOutcome],
+) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(dispatch_ids.len() + 1);
+    lines.push(format!(
+        "delegate_subagent batch ({} dispatch{}):",
+        dispatch_ids.len(),
+        if dispatch_ids.len() == 1 { "" } else { "es" }
+    ));
+    for (_, sub_id, display_name) in dispatch_ids {
+        let status = results
+            .iter()
+            .find(|o| &o.sub_id == sub_id)
+            .map(|o| match &o.result {
+                DispatchResult::Done {
+                    content: Some(c), ..
+                } => {
+                    format!("done: {} chars", c.chars().count())
+                }
+                DispatchResult::Done { content: None, .. } => "done".to_string(),
+                DispatchResult::Error { kind, message } if kind == "cancelled" => {
+                    "cancelled".to_string()
+                }
+                DispatchResult::Error { kind, message } => {
+                    format!("failed: {} ({})", kind, message)
+                }
+            })
+            .unwrap_or_else(|| "missing".to_string());
+        lines.push(format!("  • {} ({}) — {}", sub_id, display_name, status));
+    }
+    lines.join("\n")
 }
 
 // -- Tests --
@@ -1526,6 +1974,7 @@ mod tests {
             last_turn: None,
             compact: None,
             compact_threshold: 0.8,
+            todos: TodoList::default(),
         }
     }
 
@@ -1632,7 +2081,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_mode_cap_errors() {
-        let script = (0..=GOAL_MAX_TURNS)
+        let script = (0..=crate::personalities::DEFAULT_GOAL_MAX_TURNS)
             .map(|i| text_outcome("more [continue]", 1, i as u64))
             .collect();
         let completer = Arc::new(MockCompleter::new(script));
@@ -1867,6 +2316,12 @@ mod tests {
             reasoning_effort: None,
             chat_model_id: "test-model".into(),
             request_id: "parent-1".into(),
+            goal_max_turns: crate::personalities::DEFAULT_GOAL_MAX_TURNS,
+            subagent_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                crate::personalities::DEFAULT_MAX_CONCURRENT_SUBAGENTS as usize,
+            )),
+            dispatch_call_index: Arc::new(DashMap::new()),
+            subagent_cancel: Arc::new(DashMap::new()),
         }
     }
 

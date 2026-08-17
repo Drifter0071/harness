@@ -290,6 +290,56 @@ pub struct Session {
     /// Token-fill fraction above which auto-compact fires (spec §6.4). 0.0–1.0.
     #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f32,
+    /// Session-scoped todo list — the agent's plan, visible to the user
+    /// at the top of the chat. Spec `2026-08-14--agent-todo-list.md`.
+    /// `#[serde(default)]` so old session files load with an empty list.
+    #[serde(default)]
+    pub todos: TodoList,
+}
+
+// -- Todo list (spec 2026-08-14--agent-todo-list.md) --
+
+/// Per-item status. Serializes snake_case so `InProgress` → `"in_progress"`,
+/// matching the TS union in `src/lib/store.ts`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+/// One todo item. Ids are UUID v4 generated server-side so the Rust
+/// tool handler and the FE IPC client share the same id namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoItem {
+    pub id: String,
+    pub text: String,
+    pub status: TodoStatus,
+    /// 0-based, sparse allowed (gaps on delete) so a future insert
+    /// between two items doesn't require renumbering the whole list.
+    pub order: u32,
+}
+
+/// Whole todo list. `version` is a separate monotonic counter owned
+/// by the list (NOT related to `Session::version`, which is a schema
+/// constant). Bumped on every commit, used by the FE to detect lost
+/// optimistic updates on incoming `todo_changed` events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoList {
+    pub items: Vec<TodoItem>,
+    pub version: u32,
+}
+
+impl TodoList {
+    /// True when the list has at least one item and every item is
+    /// `Done`. Used by the `todo_set` validator to gate list-level
+    /// overwrite, and by the FE to drive the "all done" visual.
+    pub fn is_finished(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|i| i.status == TodoStatus::Done)
+    }
 }
 
 fn default_version() -> u32 {
@@ -561,6 +611,7 @@ pub async fn create_session(
         last_turn: None,
         compact: None,
         compact_threshold: 0.8,
+        todos: TodoList::default(),
     };
     write_session_atomic(&dir, &session).await?;
     set_active_session(project_path, &id).await?;
@@ -779,6 +830,7 @@ pub async fn migrate_v1_if_needed(project_path: &str) -> Result<Option<String>, 
         last_turn: None,
         compact: None,
         compact_threshold: 0.8,
+        todos: TodoList::default(),
     };
     derive_title(&mut session);
     let dir = ensure_sessions_dir(project_path).await?;
@@ -1007,6 +1059,7 @@ mod tests {
             last_turn: None,
             compact: None,
             compact_threshold: 0.8,
+            todos: TodoList::default(),
         }
     }
 
