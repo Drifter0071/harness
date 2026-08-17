@@ -344,7 +344,16 @@ impl ToolSpec {
             },
             ToolSpec {
                 name: "web_search".into(),
-                description: "Search the web via DuckDuckGo and return the top result titles, URLs and snippets.".into(),
+                description: "Search the web and return the top result titles, URLs and snippets. \
+                              Routes the query to the best keyless backend for its intent: \
+                              factual ('what is X', 'who is Y') → Wikipedia; \
+                              code/library ('rust async tokio', 'how to use react hooks') → GitHub; \
+                              academic ('arxiv paper on Z', 'study on W') → arXiv; \
+                              everything else → DuckDuckGo. \
+                              All backends are keyless; the tool may fall through to a different backend \
+                              if the first returns no useful content. \
+                              If the tool returns an error, do NOT retry the same query — refine the query or try a different tool."
+                    .into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -890,7 +899,13 @@ async fn tool_run_command(
 
 async fn tool_web_search(args: &Value) -> Result<ToolResult, String> {
     let query = string_arg(args, "query")?;
-    let results = crate::web_search::search_ddg(&query)
+    // Route through the multi-backend `search()` entry point. It
+    // classifies the query's intent (factual / code / academic /
+    // general) and tries the matching backend first, falling through
+    // to DuckDuckGo as the general-purpose last resort. Each backend
+    // is keyless; the router is the one that fixes the "DDG throttles
+    // 16 parallel calls" failure mode from rounds 1-2.
+    let results = crate::web_search::search(&query)
         .await
         .map_err(|e| format!("web search failed: {}", e))?;
     let mut lines = Vec::new();
@@ -902,12 +917,47 @@ async fn tool_web_search(args: &Value) -> Result<ToolResult, String> {
     } else {
         truncate(&lines.join("\n\n"), CONTENT_MAX)
     };
+    // Empty / too-thin content has historically caused subagent loops:
+    // the LLM sees the tool "succeed" with useless text, decides the
+    // search wasn't specific enough, and re-calls `web_search` with
+    // variations — eventually stalling the whole turn.
+    //
+    // The guard has two checks (both must pass for the tool to return
+    // `ok: true`):
+    //   1. The total formatted content must be at least
+    //      `MIN_USEFUL_CONTENT_CHARS` characters — catches the
+    //      "0 chars" / "30 chars" / "no results" failure mode in
+    //      round-2 telemetry.
+    //   2. At least one result must have a non-empty snippet — DDG
+    //      sometimes returns 8 result blocks with every snippet blank
+    //      (soft-throttled or anti-bot page). The block count alone
+    //      doesn't tell the agent the content is empty, since
+    //      title+url+separators add up to ~55 chars per result and
+    //      sneak past check 1.
+    let total_chars = content.chars().count();
+    let has_any_snippet = results.iter().any(|r| !r.snippet.trim().is_empty());
+    if total_chars < MIN_USEFUL_CONTENT_CHARS || !has_any_snippet {
+        return Err(format!(
+            "Web search returned no useful content for {:?} \
+             ({} parsed blocks, {} chars). \
+             Try a more specific query, or fall back to another tool.",
+            query,
+            results.len(),
+            total_chars
+        ));
+    }
     Ok(ToolResult {
         ok: true,
         summary: format!("web search for {:?} ({} results)", query, results.len()),
         content: Some(content),
     })
 }
+
+/// Minimum total character count of a `web_search` response for the
+/// tool to consider it "useful" and return `ok: true`. Below this, the
+/// tool returns an error so the calling agent sees a clear failure
+/// instead of an empty tool message that prompts another retry.
+const MIN_USEFUL_CONTENT_CHARS: usize = 50;
 
 /// `bip` — set the on-screen mascot's mood and (optionally) inner monologue.
 ///
