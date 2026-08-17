@@ -45,10 +45,41 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
   const w = useStore((s) => s.subagentWindows[requestId]);
   const healthMessages = useStore((s) => s.healthInbox[requestId] ?? []);
   const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // True when the user is at (or very near) the bottom of the scroll
+  // area — the auto-scroll only kicks in then, so a user who scrolled
+  // up to read past output isn't yanked back down on every chunk.
+  // 16 simultaneous streams × smooth-scrolls-per-chunk otherwise lock
+  // up the main thread; this also lets us switch to `auto` (instant)
+  // behavior safely.
+  const stuckToBottom = useRef(true);
 
-  // Auto-scroll to the bottom as content streams in.
+  // Track whether the user is at the bottom. We compare scrollTop
+  // against (scrollHeight - clientHeight) within a 24px slack to
+  // account for sub-pixel rounding; the scrolling container is the
+  // immediate ancestor of `endRef`.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stuckToBottom.current = distance < 24;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Auto-scroll to the bottom as content streams in. `auto` (instant)
+  // is intentional — under parallel dispatch we may have ~16
+  // subagent viewers streaming at once, and 16 simultaneous
+  // `behavior: "smooth"` animations jank badly because each one
+  // waits for the next paint. The stick-to-bottom gate above means
+  // we never yank a user away from where they were reading.
+  useEffect(() => {
+    if (!stuckToBottom.current) return;
+    const target = endRef.current;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "auto", block: "end" });
   }, [w?.content, w?.reasoning, healthMessages.length, w?.toolCalls.length]);
 
   if (!w) {
@@ -107,7 +138,10 @@ export function SubagentWindow({ requestId }: SubagentWindowProps) {
        *   - Subagent response: left-aligned assistant text with
        *     agent name above and the streaming "thinking…" indicator
        *     while working. */}
-      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0"
+      >
         {/* Task bubble — the orchestrator's delegation, right-aligned. */}
         <div className="flex justify-end animate-fade-in">
           <div className="max-w-[85%]">

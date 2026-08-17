@@ -117,3 +117,86 @@ describe("MessageBody prose + code decorator", () => {
     host.remove();
   });
 });
+
+describe("MessageBody streaming debounce", () => {
+  // The subagent viewer renders N copies of MessageBody at once
+  // (one per parallel subagent). When the orchestrator streams 50
+  // tokens/sec into each, parsing the full accumulated markdown on
+  // every chunk at full rate is the main perf cost under parallel
+  // dispatch. The debounce coalesces a stream of chunks into a
+  // single re-parse once the writer goes quiet for ~75ms.
+  //
+  // These tests are the regression net: they assert the *visible*
+  // behavior (the HTML lags the live content during a burst, then
+  // catches up) rather than the timer internals, so a future tuning
+  // of the delay doesn't make the test brittle.
+
+  async function tick(ms: number): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    });
+  }
+
+  it("renders the latest content after a quiet window", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(<MessageBody content="hello" />);
+    });
+    await tick(120);
+    const prose = host.querySelector(".prose-harness");
+    expect(prose?.textContent).toContain("hello");
+
+    await act(async () => {
+      root.render(<MessageBody content="hello world" />);
+    });
+    // Mid-burst: the debounced content is still "hello"; the new
+    // tail is held back until the writer goes quiet.
+    expect(prose?.textContent).not.toContain("world");
+    await tick(120);
+    expect(prose?.textContent).toContain("world");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("coalesces a burst of chunks into a single re-parse", async () => {
+    // Indirect test: the HTML shown to the user during a burst lags
+    // behind the live `content` prop. We render 5 chunks back-to-back
+    // and assert only the first chunk's text is visible until the
+    // debounce window elapses — i.e. the trailing-edge behavior.
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(<MessageBody content="alpha" />);
+    });
+    await tick(120);
+    let prose = host.querySelector(".prose-harness");
+    expect(prose?.textContent).toContain("alpha");
+
+    // Fire 5 chunks in a 15ms window. The displayed content should
+    // stay at "alpha" because the debounce hasn't elapsed.
+    for (const tag of ["beta", "gamma", "delta", "epsilon", "zeta"]) {
+      await act(async () => {
+        root.render(<MessageBody content={`alpha ${tag}`} />);
+      });
+      await tick(3);
+    }
+    prose = host.querySelector(".prose-harness");
+    expect(prose?.textContent).not.toContain("zeta");
+
+    // After the debounce quiet window the latest content lands.
+    await tick(120);
+    prose = host.querySelector(".prose-harness");
+    expect(prose?.textContent).toContain("zeta");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+});

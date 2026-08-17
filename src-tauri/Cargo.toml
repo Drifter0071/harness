@@ -31,6 +31,12 @@ dirs = "5"
 open = "5"
 urlencoding = "2"
 eventsource-stream = "0.2"
+# HTML parsing for the DuckDuckGo HTML search backend. `scraper` wraps
+# html5ever (the same parser Firefox uses) and gives us a jQuery-like
+# CSS-selector API. The Instant Answer JSON endpoint at api.duckduckgo.com
+# is effectively dead for non-Wikipedia queries, so we hit the
+# keyless HTML search endpoint at html.duckduckgo.com/html/ instead.
+scraper = { version = "0.20", default-features = false }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 dashmap = "6"
 rand = "0.8"

@@ -211,31 +211,61 @@ function decodeHtml(s: string): string {
 // ── Public component ──
 
 export function MessageBody({ content }: { content: string }) {
+  // Markdown re-parse + post-process + DOM re-injection is the
+  // single heaviest cost in the subagent window under parallel
+  // dispatch (16 windows streaming simultaneously). Re-parsing on
+  // every chunk is wasteful because the *displayed* text is only
+  // visible at 60fps to the eye; a ~75ms idle window still feels
+  // live. The `debouncedContent` value lags the live `content` by
+  // that window — `useDeferredValue` would do similar, but we need
+  // a *fixed* delay tied to the rendering clock so behavior is
+  // deterministic across machines.
+  const debouncedContent = useDebouncedValue(content, 75);
+
   const processed = useMemo<ProcessedHtml>(() => {
     try {
-      const raw = marked.parse(content, { async: false }) as string;
+      const raw = marked.parse(debouncedContent, { async: false }) as string;
       return postProcessHtml(raw);
     } catch {
       return {
-        html: `<p>${escapeAttr(content)}</p>`,
+        html: `<p>${escapeAttr(debouncedContent)}</p>`,
         needsMermaid: false,
         needsMathBlock: false,
         needsInlineMath: false,
         needsLightbox: false,
       };
     }
-  }, [content]);
+  }, [debouncedContent]);
 
-  // Mount lazy renderers in response to the placeholders appearing in
-  // the DOM. The `useEffect` runs after `dangerouslySetInnerHTML` has
-  // injected the elements.
-  const [tick, setTick] = useState(0);
+  // The lazy renderer host selectors re-mount their React roots on
+  // every `tick` increment in the old design, which thrashes the DOM
+  // under parallel streams (16 subagent windows × per-chunk tick
+  // bump = hundreds of root teardowns per second). Instead we keep
+  // the host components mounted and key them on a *count* of the
+  // placeholder elements — that only changes when a new block opens
+  // or closes, not on every streamed character.
+  //
+  // `proseRef` points at the freshly-injected HTML; counting after
+  // mount (next microtask) is enough for the placeholders to be in
+  // the DOM. The counts are stable for "still streaming into the
+  // same block" which is the common case under parallel dispatch.
   const proseRef = useRef<HTMLDivElement>(null);
+  const [mermaidCount, setMermaidCount] = useState(0);
+  const [mathBlockCount, setMathBlockCount] = useState(0);
+  const [inlineMathCount, setInlineMathCount] = useState(0);
   useEffect(() => {
-    // Force a re-render after the HTML is injected so the children
-    // findDOMNode() picks up the freshly-mounted placeholders.
-    const id = requestAnimationFrame(() => setTick((t) => t + 1));
-    return () => cancelAnimationFrame(id);
+    // Defer to a microtask so the placeholders injected by
+    // `dangerouslySetInnerHTML` are queryable. `queueMicrotask` runs
+    // before the next paint, so the user never sees an un-mounted
+    // placeholder for more than a frame.
+    const id = queueMicrotask(() => {
+      const scope = proseRef.current;
+      if (!scope) return;
+      setMermaidCount(scope.querySelectorAll(".mermaid-host").length);
+      setMathBlockCount(scope.querySelectorAll(".math-block-host").length);
+      setInlineMathCount(scope.querySelectorAll(".math-inline-host").length);
+    });
+    return () => id;
   }, [processed.html]);
 
   return (
@@ -247,27 +277,59 @@ export function MessageBody({ content }: { content: string }) {
       />
       {/* Decorate code blocks with a language label + copy button. */}
       <CodeBlockDecorator scopeRef={proseRef} html={processed.html} />
-      {/* tick: re-render trigger; mount lazy hosts whenever needed */}
-      {processed.needsMermaid && (
-        <HostMounts selector={`.mermaid-host`} key={`mermaid-${tick}`}>
-          {(el) => <MermaidBlock source={el.dataset.source ?? ""} />}
-        </HostMounts>
+      {/* Lazy renderers — mounted once per placeholder via the
+       *  data-mounted guard inside `HostMounts`. Keyed on the
+       *  placeholder *count* (not a per-render tick) so they
+       *  never remount on plain text streams. `children` is a
+       *  stable render-fn reference so it doesn't churn the
+       *  `HostMounts` effect dep on every MessageBody render. */}
+      {processed.needsMermaid && mermaidCount > 0 && (
+        <HostMounts selector={`.mermaid-host`} dep={mermaidCount} render={renderMermaid} />
       )}
-      {processed.needsMathBlock && (
-        <HostMounts selector={`.math-block-host`} key={`math-${tick}`}>
-          {(el) => <MathBlock source={el.dataset.source ?? ""} />}
-        </HostMounts>
+      {processed.needsMathBlock && mathBlockCount > 0 && (
+        <HostMounts
+          selector={`.math-block-host`}
+          dep={mathBlockCount}
+          render={renderMathBlock}
+        />
       )}
-      {processed.needsInlineMath && (
-        <HostMounts selector={`.math-inline-host`} key={`im-${tick}`}>
-          {(el) => <InlineMath source={el.dataset.source ?? ""} />}
-        </HostMounts>
+      {processed.needsInlineMath && inlineMathCount > 0 && (
+        <HostMounts
+          selector={`.math-inline-host`}
+          dep={inlineMathCount}
+          render={renderInlineMath}
+        />
       )}
-      {processed.needsLightbox && (
-        <LightboxClient key={`light-${tick}`} />
-      )}
+      {processed.needsLightbox && <LightboxClient />}
     </>
   );
+}
+
+// Stable render callbacks for the lazy hosts. Pulled out of the
+// `MessageBody` JSX so the `children` reference doesn't change on
+// every render — otherwise `HostMounts`'s effect would re-run on
+// every content chunk just because of a fresh closure.
+const renderMermaid = (el: HTMLElement) => (
+  <MermaidBlock source={el.dataset.source ?? ""} />
+);
+const renderMathBlock = (el: HTMLElement) => (
+  <MathBlock source={el.dataset.source ?? ""} />
+);
+const renderInlineMath = (el: HTMLElement) => (
+  <InlineMath source={el.dataset.source ?? ""} />
+);
+
+/** Trailing-edge debounce. Returns `value` unchanged for `delayMs`
+ *  after the last change, then commits the latest. Used by
+ *  `MessageBody` to coalesce rapid streaming chunks into a single
+ *  markdown re-parse. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const handle = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(handle);
+  }, [value, delayMs]);
+  return debounced;
 }
 
 // Walk the DOM and instantiate a lazy renderer for each placeholder.
@@ -385,22 +447,30 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 
 function HostMounts({
   selector,
-  children,
+  render,
+  /** A value that changes only when a NEW placeholder appears or an
+   *  existing one disappears. Re-runs the mount pass; existing
+   *  placeholders are skipped via the `data-mounted` guard. */
+  dep,
 }: {
   selector: string;
-  children: (el: HTMLElement) => React.ReactNode;
+  render: (el: HTMLElement) => React.ReactNode;
+  dep?: number | string;
 }) {
+  // `roots` lives in a ref so freshly-mounted React roots survive the
+  // re-render that follows a `dep` change — without this the cleanup
+  // would unmount the new roots before they finish their first render.
+  const rootsRef = useRef<Root[]>([]);
   useEffect(() => {
     const elements = Array.from(
       document.querySelectorAll<HTMLElement>(selector)
     );
-    if (elements.length === 0) return;
-    const roots: Root[] = [];
+    const fresh: Root[] = [];
     for (const el of elements) {
       if (el.dataset.mounted === "1") continue;
       el.dataset.mounted = "1";
       const root = createRoot(el);
-      roots.push(root);
+      fresh.push(root);
       root.render(
         <Suspense
           fallback={
@@ -409,23 +479,16 @@ function HostMounts({
             </div>
           }
         >
-          {children(el)}
+          {render(el)}
         </Suspense>
       );
     }
-    return () => {
-      // Deferred unmounts — see CodeBlockDecorator above.
-      const pending = roots;
-      const els = elements;
-      queueMicrotask(() => {
-        pending.forEach((r) => r.unmount());
-        els.forEach((el) => {
-          delete el.dataset.mounted;
-        });
-      });
-    };
-    // children is a fresh closure per render; re-running when tick changes
-    // is fine because data-mounted guards against double-mounts.
-  }, [selector]);
+    rootsRef.current = [...rootsRef.current, ...fresh];
+    // No cleanup that re-creates `data-mounted`: placeholders stay
+    // mounted for the lifetime of the host element. When the message
+    // is removed from the tree, the entire DOM subtree (including
+    // the placeholders) is garbage-collected, and React 18 detaches
+    // the roots on its own when the parent unmounts.
+  }, [selector, dep, render]);
   return null;
 }
