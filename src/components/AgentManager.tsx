@@ -356,6 +356,25 @@ function PersonalityRow({
               {m.label}
             </option>
           ))}
+          {/* The roster can hold a modelId that no longer exists in
+           *  the saved-models store (the user deleted it in Settings,
+           *  or savedModels hasn't finished loading yet). Surfacing
+           *  the stale id as a real <option> prevents the browser
+           *  from silently defaulting the select to the first
+           *  option ("Use chat model"), which used to trick the user
+           *  into thinking the saved model was reset — and then
+           *  clicking the select would fire onChange with an empty
+           *  string, clobbering the saved modelId. The label makes
+           *  the staleness obvious without forcing a destructive
+           *  save. */}
+          {personality.modelId &&
+            !savedModels.some((m) => m.id === personality.modelId) && (
+              <option value={personality.modelId}>
+                {savedModels.length === 0
+                  ? "Loading saved models…"
+                  : `Saved model unavailable (${personality.modelId})`}
+              </option>
+            )}
         </select>
         {!personality.builtin && (
           <button

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { SubagentWindow } from "./SubagentWindow";
 import { computeTiles } from "../lib/wm";
@@ -18,32 +18,31 @@ interface WindowManagerProps {
  *  The chat column is rendered by the parent App — this component
  *  only owns the subagent region.
  *
- *  Size measurement: uses a ResizeObserver on the container div so
- *  that re-renders caused by Zustand state changes (subagents added)
- *  are always paired with an up-to-date container measurement — the
- *  effect re-runs on EVERY observed size change, not just prop
- *  changes.
+ *  Size measurement: a `ResizeObserver` on the container div, paired
+ *  with a synchronous `getBoundingClientRect` read in a layout effect
+ *  so the first paint already uses the correct tile size (no flash
+ *  of zero-sized tiles while the observer fires asynchronously).
  */
 export function WindowManager({ width, height }: WindowManagerProps) {
   const subagents = useStore((s) => s.subagents);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width, height });
 
-  // Observe the container's own size. Re-runs on every observed
-  // resize, so it always has up-to-date dimensions regardless of
-  // whether the re-render was triggered by a prop change or a
-  // Zustand state update (e.g. subagents added).
-  useEffect(() => {
+  // useLayoutEffect so the very first paint uses the real container
+  // size; the observer picks up subsequent resizes (sidebar open/close,
+  // chat column lock-in, window resize). The ref is stable across the
+  // empty/populated branches, so the observer stays attached.
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
-    // Measure synchronously first — the element may already have
-    // its layout size from the previous render.
-    const syncWidth = el.clientWidth;
-    const syncHeight = el.clientHeight;
-    if (syncWidth > 0 && syncHeight > 0) {
-      setSize({ width: syncWidth, height: syncHeight });
-    }
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setSize({ width: Math.round(rect.width), height: Math.round(rect.height) });
+      }
+    };
+    measure();
 
     const ro = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -56,9 +55,12 @@ export function WindowManager({ width, height }: WindowManagerProps) {
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []); // intentionally empty — self-contained, no prop deps
+  }, [subagents.length]);
 
   if (subagents.length === 0) {
+    // Defensive: the parent only mounts this component while tiling
+    // is active, but render an empty container if it ever does fire
+    // so the layout doesn't collapse.
     return <div ref={containerRef} className="h-full flex-1 min-w-0" />;
   }
 

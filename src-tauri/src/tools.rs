@@ -178,11 +178,19 @@ pub struct SubagentDispatchContext {
     /// orchestrator turn from `Roster.max_concurrent_subagents` (default
     /// 4). Excess dispatches queue and start as permits free.
     pub subagent_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Transient map: orchestrator-side `call.id` → subagent `sub-<uuid>`
-    /// request id. Populated by `tool_delegate_subagent`, consumed by
-    /// `execute_tool_batch` to know which registry row belongs to which
-    /// orchestrator call. Cleared at the end of every batch.
-    pub dispatch_call_index: Arc<DashMap<String, String>>,
+    /// Transient map: orchestrator-side `call.id` → list of subagent
+    /// `sub-<uuid>` request ids. Populated by `tool_delegate_subagent`
+    /// (singular → 1 entry) and `tool_delegate_subagents` (plural → N
+    /// entries, spec `2026-08-14--plural-subagent-dispatch`), consumed
+    /// by `execute_tool_batch` to know which registry rows belong to
+    /// which orchestrator call. The plural case is what lets one
+    /// model-side tool call fan out into N concurrent subagent turns
+    /// without the model having to emit N separate `tool_calls` in a
+    /// single round — the orchestrator's batch dispatcher spawns one
+    /// JoinSet task per subagent id and folds their results into one
+    /// combined synthetic tool message keyed by the same call id.
+    /// Cleared at the end of every batch.
+    pub dispatch_call_index: Arc<DashMap<String, Vec<String>>>,
     /// Per-subagent cancel watchers (spec
     /// `2026-08-14--parallel-subagent-dispatch`). The frontend's
     /// "close a working subagent window" calls the existing
@@ -336,7 +344,16 @@ impl ToolSpec {
             },
             ToolSpec {
                 name: "web_search".into(),
-                description: "Search the web via DuckDuckGo and return the top result titles, URLs and snippets.".into(),
+                description: "Search the web and return the top result titles, URLs and snippets. \
+                              Routes the query to the best keyless backend for its intent: \
+                              factual ('what is X', 'who is Y') → Wikipedia; \
+                              code/library ('rust async tokio', 'how to use react hooks') → GitHub; \
+                              academic ('arxiv paper on Z', 'study on W') → arXiv; \
+                              everything else → DuckDuckGo. \
+                              All backends are keyless; the tool may fall through to a different backend \
+                              if the first returns no useful content. \
+                              If the tool returns an error, do NOT retry the same query — refine the query or try a different tool."
+                    .into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -375,7 +392,9 @@ impl ToolSpec {
                               runs in its own window with its own streaming progress. Pass the \
                               roster personality id (e.g. \"builtin-coder\") or a role name \
                               (\"coder\", \"architect\", \"researcher\", \"health-monitor\") as \
-                              `personality`, and the full task as `task`."
+                              `personality`, and the full task as `task`. For 2+ independent \
+                              tasks, prefer `delegate_subagents` (plural) so they fan out in \
+                              one round."
                     .into(),
                 parameters: json!({
                     "type": "object",
@@ -390,6 +409,53 @@ impl ToolSpec {
                         }
                     },
                     "required": ["personality", "task"]
+                }),
+            },
+            ToolSpec {
+                // Plural form (spec `2026-08-14--plural-subagent-dispatch`).
+                // One tool call, one list of `{personality, task}` entries,
+                // N concurrent subagent turns under the same subagent
+                // semaphore cap as the singular tool. Use this whenever
+                // 2+ dispatches are independent — it forces the
+                // orchestrator's parallel dispatcher to fire all of them
+                // at once, instead of relying on the model to emit
+                // multiple `delegate_subagent` calls in one round.
+                name: "delegate_subagents".into(),
+                description: "Dispatch 2 or more tasks to subagents in a single tool call. \
+                              The Orchestrator's tool loop runs every entry in parallel under \
+                              the subagent semaphore cap. Only callable by the Orchestrator. \
+                              Pass an array `dispatches` of `{personality, task}` objects — \
+                              same shape as the singular `delegate_subagent` arguments. \
+                              Returns one combined `role: \"tool\"` message summarizing all of \
+                              the dispatched subagent outcomes. Prefer this over multiple \
+                              `delegate_subagent` calls whenever the dispatches are \
+                              independent."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "dispatches": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "personality": {
+                                        "type": "string",
+                                        "description": "Roster personality id or role slug \
+                                                        to run as (same as the singular tool)"
+                                    },
+                                    "task": {
+                                        "type": "string",
+                                        "description": "The full task for this subagent"
+                                    }
+                                },
+                                "required": ["personality", "task"]
+                            }
+                        }
+                    },
+                    "required": ["dispatches"]
                 }),
             },
             ToolSpec {
@@ -536,7 +602,7 @@ impl ToolSpec {
     pub fn subagent() -> Vec<ToolSpec> {
         Self::all()
             .into_iter()
-            .filter(|t| t.name != "delegate_subagent")
+            .filter(|t| t.name != "delegate_subagent" && t.name != "delegate_subagents")
             .collect()
     }
 }
@@ -585,6 +651,7 @@ pub async fn execute_tool_with_id(
         "web_search" => tool_web_search(args).await,
         "bip" => tool_bip(ctx, args).await,
         "delegate_subagent" => tool_delegate_subagent(ctx, args, call_id).await,
+        "delegate_subagents" => tool_delegate_subagents(ctx, args, call_id).await,
         "subagent_message" => tool_subagent_message(ctx, args).await,
         // -- Todo list (spec 2026-08-14--agent-todo-list.md) --
         // `todo_remove` and `todo_clear` are gated by `requires_approval`
@@ -832,7 +899,13 @@ async fn tool_run_command(
 
 async fn tool_web_search(args: &Value) -> Result<ToolResult, String> {
     let query = string_arg(args, "query")?;
-    let results = crate::web_search::search_ddg(&query)
+    // Route through the multi-backend `search()` entry point. It
+    // classifies the query's intent (factual / code / academic /
+    // general) and tries the matching backend first, falling through
+    // to DuckDuckGo as the general-purpose last resort. Each backend
+    // is keyless; the router is the one that fixes the "DDG throttles
+    // 16 parallel calls" failure mode from rounds 1-2.
+    let results = crate::web_search::search(&query)
         .await
         .map_err(|e| format!("web search failed: {}", e))?;
     let mut lines = Vec::new();
@@ -844,12 +917,47 @@ async fn tool_web_search(args: &Value) -> Result<ToolResult, String> {
     } else {
         truncate(&lines.join("\n\n"), CONTENT_MAX)
     };
+    // Empty / too-thin content has historically caused subagent loops:
+    // the LLM sees the tool "succeed" with useless text, decides the
+    // search wasn't specific enough, and re-calls `web_search` with
+    // variations — eventually stalling the whole turn.
+    //
+    // The guard has two checks (both must pass for the tool to return
+    // `ok: true`):
+    //   1. The total formatted content must be at least
+    //      `MIN_USEFUL_CONTENT_CHARS` characters — catches the
+    //      "0 chars" / "30 chars" / "no results" failure mode in
+    //      round-2 telemetry.
+    //   2. At least one result must have a non-empty snippet — DDG
+    //      sometimes returns 8 result blocks with every snippet blank
+    //      (soft-throttled or anti-bot page). The block count alone
+    //      doesn't tell the agent the content is empty, since
+    //      title+url+separators add up to ~55 chars per result and
+    //      sneak past check 1.
+    let total_chars = content.chars().count();
+    let has_any_snippet = results.iter().any(|r| !r.snippet.trim().is_empty());
+    if total_chars < MIN_USEFUL_CONTENT_CHARS || !has_any_snippet {
+        return Err(format!(
+            "Web search returned no useful content for {:?} \
+             ({} parsed blocks, {} chars). \
+             Try a more specific query, or fall back to another tool.",
+            query,
+            results.len(),
+            total_chars
+        ));
+    }
     Ok(ToolResult {
         ok: true,
         summary: format!("web search for {:?} ({} results)", query, results.len()),
         content: Some(content),
     })
 }
+
+/// Minimum total character count of a `web_search` response for the
+/// tool to consider it "useful" and return `ok: true`. Below this, the
+/// tool returns an error so the calling agent sees a clear failure
+/// instead of an empty tool message that prompts another retry.
+const MIN_USEFUL_CONTENT_CHARS: usize = 50;
 
 /// `bip` — set the on-screen mascot's mood and (optionally) inner monologue.
 ///
@@ -950,8 +1058,8 @@ async fn tool_bip(ctx: &ToolContext, args: &Value) -> Result<ToolResult, String>
 
 /// `delegate_subagent` — spawn a subagent turn and wait for its final
 /// answer. Hard-gated to the Orchestrator: subagents get the reduced
-/// `ToolSpec::subagent()` (no `delegate_subagent`) AND this role check,
-/// so recursion is impossible through either path.
+/// `ToolSpec::subagent()` (no `delegate_subagent` / `delegate_subagents`)
+/// AND this role check, so recursion is impossible through either path.
 ///
 /// The turn runs on a scratch session, streams the standard `agent-*`
 /// events under its `sub-<uuid>` request id (the frontend opens a
@@ -979,39 +1087,241 @@ async fn tool_delegate_subagent(
     let target = string_arg(args, "personality")?;
     let task = string_arg(args, "task")?;
 
+    let registered = match register_one_dispatch(dispatch, &target, &task, call_id).await? {
+        Some(r) => r,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: format!(
+                    "delegate_subagent: {:?} is not a roster personality id or subagent role",
+                    target
+                ),
+                content: None,
+            });
+        }
+    };
+
+    // Spec `2026-08-14--parallel-subagent-dispatch`: the orchestrator's
+    // tool loop drives dispatch via `execute_tool_batch` in
+    // `agent_loop.rs`. Here we just record the dispatch — the actual
+    // subagent turn is admitted and awaited by the loop, gated by
+    // `dispatch.subagent_semaphore` (cap = `max_concurrent_subagents`).
+    // We return immediately with a queued summary; the loop polls the
+    // resulting subagent record when it needs the final content.
+    let queued = format!(
+        "queued subagent {} ({}) — running in background",
+        registered.request_id, registered.personality_name
+    );
+    Ok(ToolResult {
+        ok: true,
+        summary: queued,
+        content: None,
+    })
+}
+
+/// `delegate_subagents` (plural, spec `2026-08-14--plural-subagent-dispatch`)
+/// — fire N subagent dispatches in a single tool call. Equivalent to
+/// emitting N `delegate_subagent` tool calls in one LLM round, but lets
+/// the model fan out without the per-round output budget pressure that
+/// otherwise makes it emit one dispatch per round and wait between
+/// them. The model still gets exactly one combined `role: "tool"`
+/// message back, summarizing every dispatched subagent's outcome.
+///
+/// Hard-gated to the Orchestrator — same role check as the singular
+/// tool. Subagent recursion is impossible: `ToolSpec::subagent()`
+/// filters out both `delegate_subagent` and `delegate_subagents`, and
+/// the role check here is the second backstop.
+async fn tool_delegate_subagents(
+    ctx: &ToolContext,
+    args: &Value,
+    call_id: &str,
+) -> Result<ToolResult, String> {
+    if ctx.caller_role != AgentRole::Orchestrator {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "delegate_subagents is restricted to the Orchestrator; {:?} is not allowed",
+                ctx.caller_role
+            ),
+            content: None,
+        });
+    }
+    let Some(dispatch) = &ctx.subagent else {
+        return Err("delegate_subagents: no subagent dispatch context on this turn".into());
+    };
+
+    // Parse the array. Reject any non-array shape up front so the
+    // model gets a clear error instead of a silent empty batch.
+    let entries = match args.get("dispatches").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "delegate_subagents: `dispatches` must be a non-empty array of \
+                          {personality, task} objects"
+                    .into(),
+                content: None,
+            });
+        }
+    };
+    if entries.is_empty() {
+        return Ok(ToolResult {
+            ok: false,
+            summary: "delegate_subagents: `dispatches` must contain at least one entry".into(),
+            content: None,
+        });
+    }
+    // Cap the fan-out: matches the subagent semaphore's hard upper
+    // bound (range 1..=16) so the model can never request more
+    // dispatches than the roster permits anyway. Belt-and-braces
+    // because the LLM might ask for 50 at once.
+    const MAX_FANOUT: usize = 16;
+    if entries.len() > MAX_FANOUT {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "delegate_subagents: {} dispatches requested, max is {}",
+                entries.len(),
+                MAX_FANOUT
+            ),
+            content: None,
+        });
+    }
+
+    // Register every dispatch. We collect the (sub_id, personality
+    // name) pairs that succeeded so the queued summary can name them
+    // all, and push the failures into a per-entry error list so the
+    // model knows exactly which ones didn't take. The dispatcher
+    // runs the registered ones in parallel under the subagent
+    // semaphore, same as for N `delegate_subagent` calls in one
+    // round.
+    let mut registered: Vec<RegisteredDispatch> = Vec::with_capacity(entries.len());
+    let mut failures: Vec<String> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let target = match entry.get("personality").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                failures.push(format!("#{}: missing `personality` (string)", i));
+                continue;
+            }
+        };
+        let task = match entry.get("task").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            Some(_) => {
+                failures.push(format!("#{}: empty `task`", i));
+                continue;
+            }
+            None => {
+                failures.push(format!("#{}: missing `task` (string)", i));
+                continue;
+            }
+        };
+        match register_one_dispatch(dispatch, target, task, call_id).await? {
+            Some(r) => registered.push(r),
+            None => failures.push(format!(
+                "#{}: {:?} is not a roster personality id or subagent role",
+                i, target
+            )),
+        }
+    }
+
+    // If everything failed, surface a single error result so the model
+    // sees the problem instead of an "queued 0 subagents" lie.
+    if registered.is_empty() {
+        return Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "delegate_subagents: no dispatches registered ({})",
+                failures.join("; ")
+            ),
+            content: None,
+        });
+    }
+
+    // Build the queued summary. We name the first few personalities
+    // and tail with "and N more" if the list is long, so the
+    // ToolResult summary stays scannable in the chat log.
+    let names: Vec<String> = registered
+        .iter()
+        .map(|r| r.personality_name.clone())
+        .collect();
+    let name_preview = if names.len() <= 4 {
+        names.join(", ")
+    } else {
+        format!("{}, …and {} more", names[..4].join(", "), names.len() - 4)
+    };
+    let queued = if failures.is_empty() {
+        format!(
+            "queued {} subagents ({}) — running in background",
+            registered.len(),
+            name_preview
+        )
+    } else {
+        format!(
+            "queued {} subagents ({}); skipped {} ({})",
+            registered.len(),
+            name_preview,
+            failures.len(),
+            failures.join("; ")
+        )
+    };
+    Ok(ToolResult {
+        ok: true,
+        summary: queued,
+        content: None,
+    })
+}
+
+/// What `register_one_dispatch` returns on success. Bundles the new
+/// subagent request id and the resolved personality's display name so
+/// both the singular and plural tools can build a "queued ..." summary
+/// without re-resolving the personality.
+pub struct RegisteredDispatch {
+    pub request_id: String,
+    pub personality_name: String,
+}
+
+/// Register one subagent dispatch against the orchestrator's
+/// `SubagentDispatchContext`. Inserts the `Working` registry row, the
+/// inbox slot, the per-subagent cancel watcher, and the
+/// `call_id → sub_id` index entry. The actual subagent turn is driven
+/// later by `execute_tool_batch` in `agent_loop.rs` under the
+/// `subagent_semaphore` cap.
+///
+/// Returns `Some(RegisteredDispatch)` on success, `None` if the target
+/// didn't resolve to a subagent-eligible personality (the singular
+/// and plural tools each format their own "not a roster …" message
+/// from this so the per-entry context is preserved for the plural
+/// case).
+pub(crate) async fn register_one_dispatch(
+    dispatch: &SubagentDispatchContext,
+    target: &str,
+    task: &str,
+    call_id: &str,
+) -> Result<Option<RegisteredDispatch>, String> {
     // Resolve the personality: roster id first ("builtin-coder", a user
     // row), then a role slug ("coder", "health-monitor", …).
-    let personality = match get_personality(&target).await? {
+    let personality = match get_personality(target).await? {
         Some(p) => p,
-        None => match AgentRole::from_slug(&target) {
+        None => match AgentRole::from_slug(target) {
             Some(role) if role.is_subagent() => get_personality(&builtin_personality_id(role))
                 .await?
                 .ok_or_else(|| format!("delegate_subagent: no roster row for role {:?}", role))?,
-            _ => {
-                return Ok(ToolResult {
-                    ok: false,
-                    summary: format!(
-                        "delegate_subagent: {:?} is not a roster personality id or subagent role",
-                        target
-                    ),
-                    content: None,
-                });
-            }
+            _ => return Ok(None),
         },
     };
     // The Orchestrator is not a dispatch target: no roster row exists
     // for it, but guard anyway (a user could theoretically craft a
     // personality with the Orchestrator role — refuse to recurse).
     if !personality.role.is_subagent() {
-        return Ok(ToolResult {
-            ok: false,
-            summary: "delegate_subagent: cannot dispatch to the Orchestrator".into(),
-            content: None,
-        });
+        // Mirror the singular tool's wording so the model sees a
+        // consistent "cannot dispatch to Orchestrator" error no
+        // matter which entrypoint it used.
+        return Err("delegate_subagent: cannot dispatch to the Orchestrator".into());
     }
 
-    // Personality-bound saved model when it exists, else the orchestrator's
-    // chat model.
+    // Personality-bound saved model when it exists, else the
+    // orchestrator's chat model.
     let model_id =
         crate::models::resolve_personality_model(&personality, &dispatch.chat_model_id).await;
 
@@ -1023,7 +1333,7 @@ async fn tool_delegate_subagent(
             &personality.id,
             &personality.name,
             personality.role,
-            &task,
+            task,
             Some(&model_id),
             Some(&dispatch.request_id),
         ),
@@ -1046,33 +1356,93 @@ async fn tool_delegate_subagent(
 
     // Index orchestrator-side call id → subagent id so the batch
     // dispatcher can pair the result with the right call when it
-    // writes the combined tool message. Empty `call_id` (the only
-    // path that doesn't pass one is the in-process `execute_tool`
-    // wrapper used by callers that don't have an id, like tests) is a
-    // soft warning — the batch still works, it just can't pair the
-    // synthetic tool message by id.
+    // writes the combined tool message. The index is now a Vec
+    // because one model-side call (the plural tool) can fan out to
+    // N subagent turns. The singular tool inserts a one-element
+    // vec; the plural tool appends to (or creates) the vec for its
+    // call id. Empty `call_id` is a soft warning — the batch still
+    // works, it just can't pair the synthetic tool message by id.
     if !call_id.is_empty() {
         dispatch
             .dispatch_call_index
-            .insert(call_id.to_string(), request_id.clone());
+            .entry(call_id.to_string())
+            .or_default()
+            .push(request_id.clone());
     }
 
-    // Spec `2026-08-14--parallel-subagent-dispatch`: the orchestrator's
-    // tool loop drives dispatch via `execute_tool_batch` in
-    // `agent_loop.rs`. Here we just record the dispatch — the actual
-    // subagent turn is admitted and awaited by the loop, gated by
-    // `dispatch.subagent_semaphore` (cap = `max_concurrent_subagents`).
-    // We return immediately with a queued summary; the loop polls the
-    // resulting subagent record when it needs the final content.
-    let queued = format!(
-        "queued subagent {} ({}) — running in background",
-        request_id, personality.name
-    );
-    Ok(ToolResult {
-        ok: true,
-        summary: queued,
-        content: None,
-    })
+    Ok(Some(RegisteredDispatch {
+        request_id,
+        personality_name: personality.name,
+    }))
+}
+
+/// Register every subagent dispatch in a `delegate_subagents` (plural)
+/// tool call against the orchestrator's `SubagentDispatchContext`.
+/// Returns the list of successfully-registered `(request_id,
+/// personality_name)` pairs. Per-entry validation failures
+/// (missing `personality` / `task`, unknown target) are collected in
+/// the `failures` out-param so the caller can surface them in the
+/// queued summary.
+///
+/// Hard-fails (returns `Err`) only on the role-gate denial, which is
+/// already handled by `tool_delegate_subagents` before calling here.
+pub(crate) async fn register_plural_dispatches(
+    dispatch: &SubagentDispatchContext,
+    args: &Value,
+    call_id: &str,
+) -> (Vec<RegisteredDispatch>, Vec<String>) {
+    let mut registered = Vec::new();
+    let mut failures = Vec::new();
+    let entries = match args.get("dispatches").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            failures.push("`dispatches` must be a non-empty array".into());
+            return (registered, failures);
+        }
+    };
+    if entries.is_empty() {
+        failures.push("`dispatches` must contain at least one entry".into());
+        return (registered, failures);
+    }
+    for (i, entry) in entries.iter().enumerate() {
+        let target = match entry.get("personality").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                failures.push(format!("#{}: missing `personality` (string)", i));
+                continue;
+            }
+        };
+        let task = match entry.get("task").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            Some(_) => {
+                failures.push(format!("#{}: empty `task`", i));
+                continue;
+            }
+            None => {
+                failures.push(format!("#{}: missing `task` (string)", i));
+                continue;
+            }
+        };
+        // We treat per-entry resolution errors as soft failures
+        // (logged in `failures`, no registration) so one bad
+        // entry doesn't kill the whole batch. The only hard error
+        // is the Orchestrator-role guard inside
+        // `register_one_dispatch`, which we propagate.
+        match register_one_dispatch(dispatch, target, task, call_id).await {
+            Ok(Some(r)) => registered.push(r),
+            Ok(None) => failures.push(format!(
+                "#{}: {:?} is not a roster personality id or subagent role",
+                i, target
+            )),
+            Err(e) => {
+                // Hard failure (e.g. Orchestrator-role target).
+                // Surface it as a per-entry failure so the rest of
+                // the batch still gets a chance.
+                failures.push(format!("#{}: {}", i, e));
+            }
+        }
+    }
+    (registered, failures)
 }
 
 /// `subagent_message` — deliver a message to a running subagent. The
@@ -2155,20 +2525,217 @@ mod tests {
         assert!(res.content.is_none());
 
         // Registry: one `Working` row, indexed by the call id we
-        // passed in.
+        // passed in. Singular tool → Vec of length 1.
         assert_eq!(dispatch.subagents.len(), 1);
         let rec = dispatch.subagents.iter().next().unwrap().value().clone();
         assert_eq!(rec.status, crate::agent::SubagentStatus::Working);
         assert_eq!(rec.role, AgentRole::Coder);
         assert_eq!(rec.parent_request_id.as_deref(), Some("parent-1"));
-        let (idx_call, idx_sub) = dispatch
+        let (idx_call, idx_subs) = dispatch
             .dispatch_call_index
             .iter()
             .next()
             .map(|e| (e.key().clone(), e.value().clone()))
             .unwrap();
         assert_eq!(idx_call, "call-1");
-        assert!(idx_sub.starts_with("sub-"));
+        assert_eq!(idx_subs.len(), 1);
+        assert!(idx_subs[0].starts_with("sub-"));
+    }
+
+    #[tokio::test]
+    async fn delegate_subagents_refuses_non_orchestrator() {
+        // Spec `2026-08-14--plural-subagent-dispatch`: plural tool is
+        // hard-gated to the Orchestrator, same as the singular tool.
+        // Subagent recursion stays impossible through either path.
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let (ctx, _) = ctx_for(&w, AgentRole::Coder);
+        let res = execute_tool(
+            &ctx,
+            "delegate_subagents",
+            &json!({"dispatches": [{"personality": "coder", "task": "x"}]}),
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("Orchestrator"));
+    }
+
+    #[tokio::test]
+    async fn delegate_subagents_rejects_empty_or_missing_array() {
+        // Spec `2026-08-14--plural-subagent-dispatch`: a `dispatches`
+        // that is missing, not an array, or empty is a per-call error
+        // — never a silent no-op that spawns 0 subagents.
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, _) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+
+        // Missing `dispatches`.
+        let res = execute_tool_with_id(&ctx, "delegate_subagents", &json!({}), "call-missing")
+            .await
+            .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("non-empty array"));
+
+        // Empty array.
+        let res = execute_tool_with_id(
+            &ctx,
+            "delegate_subagents",
+            &json!({"dispatches": []}),
+            "call-empty",
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("at least one entry"));
+
+        // Wrong type.
+        let res = execute_tool_with_id(
+            &ctx,
+            "delegate_subagents",
+            &json!({"dispatches": "not-an-array"}),
+            "call-wrong-type",
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("non-empty array"));
+    }
+
+    #[tokio::test]
+    async fn delegate_subagents_registers_all_dispatches_under_one_call_id() {
+        // Spec `2026-08-14--plural-subagent-dispatch`: one tool call
+        // → N subagent rows in the registry, all indexed under the
+        // same call id. The batch dispatcher then spawns N
+        // concurrent subagent turns under the semaphore cap.
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let completer = Arc::new(MockCompleter::new(vec![text_outcome("done")]));
+        let (ctx, dispatch) = orchestrator_dispatch_ctx(&w, &sink, completer);
+
+        let res = execute_tool_with_id(
+            &ctx,
+            "delegate_subagents",
+            &json!({
+                "dispatches": [
+                    {"personality": "coder", "task": "fix the bug"},
+                    {"personality": "architect", "task": "review the design"},
+                    {"personality": "researcher", "task": "summarize the spec"}
+                ]
+            }),
+            "call-plural",
+        )
+        .await
+        .unwrap();
+        assert!(res.ok, "summary: {}", res.summary);
+        assert!(res.summary.contains("queued 3 subagents"));
+        assert!(res.content.is_none());
+
+        // Registry: 3 Working rows, all indexed under the same call id.
+        assert_eq!(dispatch.subagents.len(), 3);
+        let mut roles: Vec<AgentRole> = dispatch.subagents.iter().map(|e| e.value().role).collect();
+        roles.sort_by_key(|r| format!("{:?}", r));
+        assert_eq!(
+            roles,
+            vec![
+                AgentRole::Architect,
+                AgentRole::Coder,
+                AgentRole::Researcher
+            ]
+        );
+
+        // dispatch_call_index: one entry per call id, holding a
+        // Vec of 3 subagent ids in the order they were registered.
+        let subs = dispatch
+            .dispatch_call_index
+            .get("call-plural")
+            .expect("call-plural should be in the index")
+            .value()
+            .clone();
+        assert_eq!(subs.len(), 3);
+        for s in &subs {
+            assert!(s.starts_with("sub-"));
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_subagents_partially_succeeds_with_per_entry_failures() {
+        // Spec `2026-08-14--plural-subagent-dispatch`: per-entry
+        // validation failures (unknown target, missing/empty
+        // personality/task) are collected and reported in the queued
+        // summary, but valid entries in the same batch still get
+        // registered. Only when **every** entry fails does the tool
+        // return `ok: false`.
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, dispatch) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+
+        let res = execute_tool_with_id(
+            &ctx,
+            "delegate_subagents",
+            &json!({
+                "dispatches": [
+                    {"personality": "coder", "task": "valid 1"},
+                    {"personality": "ghost", "task": "unknown target"},
+                    {"personality": "architect", "task": "valid 2"},
+                    {"personality": "coder", "task": ""}
+                ]
+            }),
+            "call-mixed",
+        )
+        .await
+        .unwrap();
+        assert!(res.ok, "summary: {}", res.summary);
+        assert!(
+            res.summary.contains("queued 2 subagents"),
+            "summary was: {}",
+            res.summary
+        );
+        assert!(res.summary.contains("skipped 2"));
+
+        // Two real subagent rows registered (the two valid entries).
+        assert_eq!(dispatch.subagents.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delegate_subagents_fails_when_every_entry_is_invalid() {
+        // Spec `2026-08-14--plural-subagent-dispatch`: if every entry
+        // fails validation, the tool returns `ok: false` with a
+        // summary explaining why — never `ok: true, queued 0`.
+        let _g = DataDirGuard::new();
+        let dir = TempDir::new().unwrap();
+        let w = ws(&dir);
+        let sink = Arc::new(TestSink::default());
+        let (ctx, dispatch) =
+            orchestrator_dispatch_ctx(&w, &sink, Arc::new(MockCompleter::new(Vec::new())));
+
+        let res = execute_tool_with_id(
+            &ctx,
+            "delegate_subagents",
+            &json!({
+                "dispatches": [
+                    {"personality": "ghost-1", "task": "x"},
+                    {"personality": "ghost-2", "task": "y"}
+                ]
+            }),
+            "call-allbad",
+        )
+        .await
+        .unwrap();
+        assert!(!res.ok);
+        assert!(res.summary.contains("no dispatches registered"));
+        // Nothing landed in the registry.
+        assert_eq!(dispatch.subagents.len(), 0);
+        // Index is clean (we never inserted anything for this call id).
+        assert!(dispatch.dispatch_call_index.get("call-allbad").is_none());
     }
 
     #[tokio::test]
